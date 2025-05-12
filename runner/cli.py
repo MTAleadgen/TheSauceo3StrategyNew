@@ -7,7 +7,11 @@ import requests
 import pandas as pd
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+import json
+import math # For pagination
+import backoff # For retries
+from requests.exceptions import RequestException # Specific exception for backoff
 
 # Dynamically adjust path to import pipeline modules
 # Assuming runner/cli.py is run from the project root (e.g., python -m runner.cli)
@@ -27,11 +31,13 @@ except ImportError as e:
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # --- Constants ---
 SERPAPI_TIMEOUT = 30 # seconds for SerpAPI request
 SERPAPI_MAX_RETRIES = 3
 SERPAPI_BACKOFF_FACTOR = 2 # seconds
+SERPAPI_RESULTS_PER_PAGE = 20 # Standard for Google Events API via SerpApi
 
 # --- Helper Functions ---
 
@@ -105,20 +111,17 @@ def call_serpapi_with_retry(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def upsert_event(supabase: Client, event_data: Dict[str, Any]) -> bool:
     """Upserts a single event into the Supabase 'events' table."""
     try:
-        # Ensure conflict keys are present for upsert
-        conflict_keys = ['event_day', 'venue', 'name']
-        if any(event_data.get(k) is None for k in conflict_keys):
-            logging.warning(f"Skipping upsert due to missing conflict key(s) (event_day, venue, name) for event: {event_data.get('source_id') or event_data.get('name')}")
-            return False # Cannot perform upsert without conflict keys
+        # Removed check: Ensure conflict keys are present for upsert
+        # conflict_keys = ['event_day', 'venue', 'name']
+        # if any(event_data.get(k) is None for k in conflict_keys):
+        #     logging.warning(f"Skipping upsert due to missing conflict key(s) (event_day, venue, name) for event: {event_data.get('source_id') or event_data.get('name')}")
+        #     return False # Cannot perform upsert without conflict keys
 
-        # Supabase client upsert
-        # Note: Supabase `upsert` uses `on_conflict` with primary key by default unless specified.
-        # For a UNIQUE constraint like `uniq_event` (event_day, venue, name), 
-        # you might need to specify it if it's not the primary key or handle it differently.
-        # Let's assume for now the default behavior or a trigger handles the specific conflict.
-        # If `uniq_event` needs explicit handling, the `on_conflict` parameter is needed.
-        # Check supabase-py documentation for exact `on_conflict` syntax if required.
-        response = supabase.table('events').upsert(event_data).execute()
+        # Supabase client upsert with specified conflict columns
+        response = supabase.table('events').upsert(
+            event_data,
+            on_conflict='event_day,venue,name' # Specify conflict columns as a comma-separated string
+        ).execute()
         
         # Check response (supabase-py v1+ returns APIResponse)
         if hasattr(response, 'data') and response.data:
@@ -136,17 +139,45 @@ def upsert_event(supabase: Client, event_data: Dict[str, Any]) -> bool:
         logging.debug(f"Event data causing error: {event_data}")
         return False
 
+# --- Placeholder for Email Function ---
+def send_email(summary_data: Dict[str, Any]):
+    """Placeholder function to send email summary. Implement later."""
+    logging.info("Placeholder: send_email function called. Email sending not implemented.")
+    # Example: print JSON to log for now
+    logging.debug(f"Email Summary Data:\n{json.dumps(summary_data, indent=2, default=str)}")
+    pass
+
 # --- Main Execution --- 
 
 def main():
     start_time = time.time()
-    load_dotenv()
+    # Revert to standard load_dotenv
+    load_dotenv() 
+    # # Explicitly provide path to .env file in current directory
+    # dotenv_path = os.path.join(os.getcwd(), '.env') 
+    # # Set override=True in case system env vars conflict (optional, but can help)
+    # loaded = load_dotenv(dotenv_path=dotenv_path, override=True) 
+    # if not loaded:
+    #     print(f"--- DIAGNOSTIC: Failed to load .env file from {dotenv_path} ---")
+    # # load_dotenv()
+    # # --- DIAGNOSTIC PRINT ---
+    # print("--- DIAGNOSTIC: Checking Environment Variables ---")
+    # print(f"SUPABASE_URL: {os.getenv('SUPABASE_URL')}")
+    # print(f"SUPABASE_KEY: {os.getenv('SUPABASE_KEY')}")
+    # print(f"SERPAPI_API_KEY: {os.getenv('SERPAPI_API_KEY')}")
+    # print(f"GOOGLE_PLACES_API_KEY: {os.getenv('GOOGLE_PLACES_API_KEY')}")
+    # print(f"LAMBDA_API_KEY: {os.getenv('LAMBDA_API_KEY')}")
+    # print("--- END DIAGNOSTIC ---")
     
     parser = argparse.ArgumentParser(description="Run data pipeline for TheSauceo3.")
-    parser.add_argument("--mode", default="serpapi_events", help="Pipeline mode (e.g., pipelines.serpapi.events)")
-    parser.add_argument("--cities", default="data/cities_shortlist.csv", help="Path to cities shortlist CSV file.")
-    parser.add_argument("--batch-size", type=int, default=100, help="Number of SerpAPI requests per processing chunk.")
-    parser.add_argument("--max-cities", type=int, default=None, help="Maximum number of cities to process (for testing).")
+    parser.add_argument("--mode", required=True, choices=["serpapi_events"], help="Pipeline mode to run.")
+    parser.add_argument("--cities", required=True, help="Path to the cities CSV file.")
+    parser.add_argument("--max-cities", type=int, default=None, help="Maximum number of cities to process.")
+    parser.add_argument("--batch-size", type=int, default=50, help="Number of cities to process in each batch (currently processes one city at a time).") # Batching might be re-evaluated
+    # NEW ARGUMENTS
+    parser.add_argument("--max-events", type=int, default=DEFAULT_MAX_EVENTS_PER_CITY, help=f"Maximum events to fetch per city (default: {DEFAULT_MAX_EVENTS_PER_CITY}).")
+    parser.add_argument("--days-forward", type=int, default=DEFAULT_DAYS_FORWARD, help=f"How many days into the future to include events for (default: {DEFAULT_DAYS_FORWARD}).")
+    
     args = parser.parse_args()
 
     # --- Argument Validation and Setup ---
@@ -238,7 +269,7 @@ def main():
             for event_raw in events_results:
                 try:
                     # 3a. Parse
-                    parsed_event = parse_event_result(event_raw)
+                    parsed_event = parse_event_result(event_raw, args.days_forward)
                     if not parsed_event.get('source_id'):
                         logging.warning("Parsed event missing source_id, skipping.")
                         continue
@@ -283,35 +314,14 @@ def main():
     end_time = time.time()
     summary["runtime_seconds"] = round(end_time - start_time, 2)
 
-    summary_message = f"""
-Pipeline Run Summary ({args.mode}):
---------------------------------------
-Total Cities Scanned:  {summary['total_cities_processed']}/{total_cities}
-SerpAPI Requests:      {summary['total_serpapi_requests']}
-SerpAPI Credits Used:  {summary['total_serpapi_credits_used']}
-SerpAPI API Errors:    {summary['serpapi_api_errors']}
-
-Events Found:          {summary['events_found']}
-Place Enrich Attempts: {summary['enrichment_attempts']}
-Desc Rewrite Attempts: {summary['rewrite_attempts']}
-
-DB Upserts Success:    {summary['events_upserted_success']}
-DB Upserts Failure:    {summary['events_upserted_failure']}
-(DB Errors):         ({summary['database_errors']})
-
-Total Runtime:         {summary['runtime_seconds']} seconds
---------------------------------------
-"""
-
     # Email Stub / Output
-    smtp_host = os.getenv("SMTP_HOST")
-    if smtp_host:
-        logging.info("SMTP_HOST is set. Email sending not implemented yet. Printing summary.")
-        # Add email sending logic here later
-        print(summary_message)
+    if os.getenv("SMTP_HOST"):
+        logging.info("SMTP_HOST is set. Attempting to send email summary.")
+        send_email(summary)        # implement later
     else:
-        logging.info("SMTP_HOST not set. Printing summary to console.")
-        print(summary_message)
+        logging.info("SMTP_HOST not set. Logging run summary as JSON.")
+        # Use logging instead of print for consistency
+        logging.info("Run summary:\n%s", json.dumps(summary, indent=2, default=str))
 
 if __name__ == "__main__":
     main()

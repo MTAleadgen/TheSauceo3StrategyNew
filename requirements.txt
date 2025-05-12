@@ -1,0 +1,8 @@
+pandas
+python-dotenv
+requests
+supabase
+backoff
+httpx
+pyuule
+python-dateutil 
