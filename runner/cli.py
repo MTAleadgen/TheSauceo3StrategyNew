@@ -12,6 +12,7 @@ import json
 import math # For pagination
 import backoff # For retries
 from requests.exceptions import RequestException # Specific exception for backoff
+from pipelines.serpapi.events.qwen_cleaner import rewrite_description
 
 # Dynamically adjust path to import pipeline modules
 # Assuming runner/cli.py is run from the project root (e.g., python -m runner.cli)
@@ -23,7 +24,6 @@ try:
     from pipelines.serpapi.events.request_builder import build_params
     from pipelines.serpapi.events.parser import parse_event_result
     from pipelines.serpapi.events.places_enricher import enrich_with_places
-    from pipelines.serpapi.events.qwen_cleaner import rewrite_description
 except ImportError as e:
     print(f"Error importing pipeline modules: {e}")
     print("Ensure the script is run correctly relative to the project structure, e.g., using 'python -m runner.cli'")
@@ -33,9 +33,11 @@ except ImportError as e:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Constants ---
-SERPAPI_TIMEOUT = 30 # seconds for SerpAPI request
-SERPAPI_MAX_RETRIES = 3
+# Constants
+DEFAULT_MAX_EVENTS_PER_CITY = 100
+DEFAULT_DAYS_FORWARD = 30
+SERPAPI_TIMEOUT = 60 # seconds for SerpAPI request (Increased from 30)
+SERPAPI_MAX_RETRIES = 5 # Increased from 3
 SERPAPI_BACKOFF_FACTOR = 2 # seconds
 SERPAPI_RESULTS_PER_PAGE = 20 # Standard for Google Events API via SerpApi
 
@@ -267,11 +269,20 @@ def main():
             logging.info(f"Found {len(events_results)} potential events for {city_row.get('name')}")
 
             for event_raw in events_results:
+                parsed_event = None # Initialize to None
                 try:
                     # 3a. Parse
                     parsed_event = parse_event_result(event_raw, args.days_forward)
-                    if not parsed_event.get('source_id'):
-                        logging.warning("Parsed event missing source_id, skipping.")
+                    
+                    # If parsing failed or event was filtered out, skip to next event_raw
+                    if parsed_event is None:
+                        # source_id might not exist if parsing failed very early
+                        event_identifier = event_raw.get("link") or event_raw.get("title", "UNKNOWN_EVENT")
+                        logging.warning(f"Skipping event processing for {event_identifier} as parsing returned None.")
+                        continue
+
+                    if not parsed_event.get('source_id'): # This check might be redundant if None is handled above
+                        logging.warning("Parsed event missing source_id, skipping. Event data: " + str(parsed_event))
                         continue
 
                     # 3b. Enrich (if needed)
@@ -304,7 +315,12 @@ def main():
                         summary["database_errors"] += 1 # Increment general DB error counter
 
                 except Exception as e:
-                    logging.error(f"Failed processing event item {event_raw.get('event_id', 'UNKNOWN')} for city {city_row.get('name')}: {e}")
+                    # Log the specific event_raw that caused the error if possible
+                    failed_event_id = event_raw.get("link") or event_raw.get("title", "UNKNOWN_RAW_EVENT")
+                    logging.error(f"Failed processing event item {failed_event_id} for city {city_row.get('name')}: {e}")
+                    # Log the parsed_event if it exists and parsing didn't fail catastrophically
+                    if parsed_event:
+                        logging.error(f"State of parsed_event at time of failure: {parsed_event}")
                     summary["events_upserted_failure"] += 1 # Count as failure if processing fails
 
         logging.info(f"Finished batch {i + 1}/{num_batches}. Sleeping briefly...")

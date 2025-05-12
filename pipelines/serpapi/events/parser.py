@@ -73,16 +73,39 @@ def parse_event_result(raw: dict[str, Any], days_forward: int) -> Optional[dict[
 
     if start_date_str:
         try:
+            # --- Pre-process date strings for known abbreviations (e.g., Portuguese) ---
+            replacements = {
+                "mai.": "May",
+                "sáb.": "Sat",
+                "dom.": "Sun",
+                # Add other common abbreviations for pt, es, etc. as needed
+                "ene.": "Jan", "feb.": "Feb", "mar.": "Mar", "abr.": "Apr", 
+                "jun.": "Jun", "jul.": "Jul", "ago.": "Aug", "sep.": "Sep", 
+                "oct.": "Oct", "nov.": "Nov", "dic.": "Dec",
+                "lun.": "Mon", "mar.": "Tue", "mié.": "Wed", "jue.": "Thu", "vie.": "Fri",
+                # Consider case insensitivity if needed
+            }
+            processed_start_date_str = start_date_str
+            processed_when_str = when
+            
+            if processed_start_date_str:
+                 for abbr, full in replacements.items():
+                      processed_start_date_str = processed_start_date_str.replace(abbr, full)
+            if processed_when_str:
+                 for abbr, full in replacements.items():
+                      processed_when_str = processed_when_str.replace(abbr, full)
+            # -------------------------------------------------------------------------
+
             # Use dateutil.parser for flexibility (handles various formats)
             # Combine start_date with 'when' if 'when' seems to contain time info
-            full_date_str = start_date_str
-            if when and ("-" in when or ":" in when or "AM" in when.upper() or "PM" in when.upper()):
+            full_date_str = processed_start_date_str # Use processed string
+            if processed_when_str and ("-" in processed_when_str or ":" in processed_when_str or "AM" in processed_when_str.upper() or "PM" in processed_when_str.upper()):
                 # Basic check if 'when' looks like it includes time
                  # Combine intelligently, avoiding duplicate date parts if possible
-                if start_date_str not in when: 
-                     full_date_str = f"{start_date_str} {when}"
+                if processed_start_date_str not in processed_when_str: 
+                     full_date_str = f"{processed_start_date_str} {processed_when_str}"
                 else:
-                    full_date_str = when # Assume 'when' is more complete
+                    full_date_str = processed_when_str # Assume 'when' is more complete (and now processed)
             
             # Parse the combined string or just start_date
             # fuzzy=True helps with slightly malformed strings but can be risky
@@ -126,7 +149,7 @@ def parse_event_result(raw: dict[str, Any], days_forward: int) -> Optional[dict[
             event_day = start_dt_utc.date() # Derive event_day from the UTC datetime
 
         except Exception as e:
-            logger.warning(f"Could not parse date ('{start_date_str}', 'when': '{when}') for event '{name}': {e}")
+            logger.warning(f"Could not parse date (Original: '{start_date_str}', 'when': '{when}' / Processed: '{full_date_str}') for event '{name}': {e}")
             # If date parsing fails, we can't filter or set event_day, skip event
             return None 
     else:
