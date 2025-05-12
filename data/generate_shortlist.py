@@ -1,6 +1,14 @@
 import pandas as pd
-from pathlib import Path
-import csv
+# from pathlib import Path # Not used anymore
+# import csv # Not used anymore
+import os
+import requests # Keep for downloading cities/admin files
+import logging
+# import time # No longer needed for SerpApi rate limiting
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (still useful if other env vars are used)
+load_dotenv()
 
 # Define North and South American ISO country codes (using UN geoscheme primarily)
 NA_SA_CODES = {
@@ -44,6 +52,21 @@ CITY_OVERRIDES = {
     'Paramaribo': {'hl': 'nl'}, # Matches default for SR, but explicit override is fine
 }
 
+# Define the URL for the GeoNames cities file
+CITIES_FILE_URL = "https://download.geonames.org/export/dump/cities15000.zip"
+CITIES_FILE_ZIP = "data/cities15000.zip"
+CITIES_FILE_TXT = "data/cities15000.txt"
+
+# Define the URL for the GeoNames admin1 codes file
+ADMIN1_FILE_URL = "https://download.geonames.org/export/dump/admin1CodesASCII.txt"
+ADMIN1_FILE_TXT = "data/admin1CodesASCII.txt"
+
+# Define the output file path
+OUTPUT_CSV_FILE = "data/cities_shortlist.csv"
+
+# SerpApi Locations API endpoint -- NO LONGER USED
+# SERPAPI_LOCATIONS_URL = "https://serpapi.com/locations.json"
+
 # Define column names for cities15000.txt based on GeoNames format
 COLUMN_NAMES = [
     'geonameid', 'name', 'asciiname', 'alternatenames', 'latitude', 'longitude',
@@ -52,94 +75,179 @@ COLUMN_NAMES = [
     'dem', 'timezone', 'modification_date'
 ]
 
-def build_shortlist(
-    infile: Path = Path("data/cities15000.txt"),
-    outfile: Path = Path("data/cities_shortlist.csv"),
-    limit: int = 1250,
-) -> None:
-    """
-    Reads cities15000.txt, filters for North/South America, sorts by population,
-    limits the results, adds hl/gl columns, writes to CSV, and deletes the input file.
-    """
-    if not infile.exists():
-        print(f"Error: Input file not found at {infile}")
+# Define column names for admin1CodesASCII.txt
+ADMIN1_COLUMN_NAMES = ['code', 'name', 'name_ascii', 'geonameid_admin1']
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def download_file(url, local_path):
+    """Downloads a file from a URL to a local path if it doesn't exist."""
+    if not os.path.exists(local_path):
+        logging.info(f"Downloading {os.path.basename(local_path)} from {url}...")
+        try:
+            response = requests.get(url, stream=True)
+            response.raise_for_status()  # Raise an exception for bad status codes
+            with open(local_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            logging.info(f"Successfully downloaded {os.path.basename(local_path)}.")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error downloading {url}: {e}")
+            if os.path.exists(local_path):
+                os.remove(local_path) # Clean up partially downloaded file
+            raise # Re-raise the exception to halt execution
+    else:
+        logging.info(f"{os.path.basename(local_path)} already exists locally.")
+
+# --- REMOVED get_serpapi_canonical_location function ---
+# def get_serpapi_canonical_location(city_name, country_code, api_key):
+#     ...
+
+def build_shortlist():
+    """Filters cities15000, adds hl/gl, merges admin1 names, writes to CSV, deletes source."""
+    # 0. Get SerpAPI Key -- NO LONGER NEEDED FOR THIS SCRIPT
+    # serpapi_key = os.getenv("SERPAPI_API_KEY")
+    # if not serpapi_key:
+    #     logging.error("SERPAPI_API_KEY environment variable not set. Cannot fetch canonical locations or run pipeline.")
+    #     return
+
+    # 1. Download required files
+    download_file(CITIES_FILE_URL, CITIES_FILE_ZIP)
+    download_file(ADMIN1_FILE_URL, ADMIN1_FILE_TXT)
+
+    # 2. Unzip the cities file (if not already unzipped)
+    if not os.path.exists(CITIES_FILE_TXT):
+        import zipfile
+        logging.info(f"Unzipping {CITIES_FILE_ZIP}...")
+        try:
+            with zipfile.ZipFile(CITIES_FILE_ZIP, 'r') as zip_ref:
+                zip_ref.extractall("data/")
+            logging.info(f"Successfully unzipped to {CITIES_FILE_TXT}.")
+        except zipfile.BadZipFile:
+            logging.error(f"Error: {CITIES_FILE_ZIP} is not a valid zip file or is corrupted.")
+            if os.path.exists(CITIES_FILE_TXT):
+                 os.remove(CITIES_FILE_TXT)
+            os.remove(CITIES_FILE_ZIP)
+            logging.info("Removed potentially corrupted zip and text files. Please re-run the script.")
+            return
+        except Exception as e:
+            logging.error(f"An unexpected error occurred during unzipping: {e}")
+            return
+    else:
+        logging.info(f"{CITIES_FILE_TXT} already exists.")
+
+    # 3. Load Admin1 Names
+    logging.info(f"Loading admin1 names from {ADMIN1_FILE_TXT}...")
+    try:
+        df_admin1 = pd.read_csv(
+            ADMIN1_FILE_TXT,
+            sep='\t',
+            header=None,
+            names=ADMIN1_COLUMN_NAMES,
+            usecols=['code', 'name'],
+            encoding='utf-8',
+            on_bad_lines='warn'
+        )
+        df_admin1['country_admin1_key'] = df_admin1['code']
+        df_admin1 = df_admin1[['country_admin1_key', 'name']].rename(columns={'name': 'admin1_name'})
+        admin1_map = df_admin1.set_index('country_admin1_key')['admin1_name'].to_dict()
+        logging.info(f"Loaded {len(admin1_map)} admin1 names.")
+    except FileNotFoundError:
+        logging.error(f"Error: {ADMIN1_FILE_TXT} not found. Cannot proceed.")
+        return
+    except Exception as e:
+        logging.error(f"Error loading admin1 names: {e}")
         return
 
+    # 4. Load and Process Cities Data
+    logging.info(f"Loading cities data from {CITIES_FILE_TXT}...")
     try:
-        # Read the tab-separated file
         df = pd.read_csv(
-            infile,
-            sep='\\t',
+            CITIES_FILE_TXT,
+            sep='\t',
             header=None,
             names=COLUMN_NAMES,
+            # Make sure latitude and longitude are loaded!
+            usecols=['name', 'asciiname', 'latitude', 'longitude', 'country_code', 'admin1_code', 'population', 'timezone', 'geonameid'],
             encoding='utf-8',
-            engine='python', # Needed because default 'c' engine doesn't handle \\t well sometimes
-            quoting=csv.QUOTE_NONE # Important for GeoNames format
+            low_memory=False,
+            on_bad_lines='warn'
         )
+    except FileNotFoundError:
+        logging.error(f"Error: {CITIES_FILE_TXT} not found. Cannot proceed.")
+        return
+    except Exception as e:
+        logging.error(f"Error loading cities data: {e}")
+        return
 
-        # Filter by North & South American country codes
-        df_filtered = df[df['country_code'].isin(NA_SA_CODES)].copy()
+    logging.info(f"Processing {len(df)} cities...")
 
-        # Convert population to numeric, coerce errors to NaN, and drop rows with invalid population
-        df_filtered['population'] = pd.to_numeric(df_filtered['population'], errors='coerce')
-        df_filtered.dropna(subset=['population'], inplace=True)
-        df_filtered['population'] = df_filtered['population'].astype(int) # Convert to integer
+    df_americas = df[df['country_code'].isin(NA_SA_CODES)].copy()
+    logging.info(f"Filtered to {len(df_americas)} cities in the Americas.")
 
-        # Sort by population descending
-        df_sorted = df_filtered.sort_values(by='population', ascending=False)
+    df_americas['population'] = pd.to_numeric(df_americas['population'], errors='coerce').fillna(0)
+    df_sorted = df_americas.sort_values(by='population', ascending=False)
 
-        # Keep top N entries
-        df_limited = df_sorted.head(limit).copy() # Use copy to avoid SettingWithCopyWarning
+    df_limited = df_sorted.head(1250).copy()
+    logging.info(f"Limited to top {len(df_limited)} cities by population.")
 
-        # Add hl and gl columns
-        def get_setting(row, setting_type):
-            country = row['country_code']
-            city = row['name']
+    # Apply country settings for hl/gl
+    df_limited['hl'] = df_limited['country_code'].map(lambda cc: COUNTRY_SETTINGS.get(cc, {'hl': 'en'}).get('hl'))
+    df_limited['gl'] = df_limited['country_code'].map(lambda cc: COUNTRY_SETTINGS.get(cc, {'gl': cc}).get('gl'))
 
-            # Check city overrides first
-            if city in CITY_OVERRIDES and setting_type in CITY_OVERRIDES[city]:
-                return CITY_OVERRIDES[city][setting_type]
+    # Apply specific overrides
+    for city_name, overrides in CITY_OVERRIDES.items():
+        for col, val in overrides.items():
+            df_limited.loc[df_limited['name'] == city_name, col] = val
+    logging.info("Applied hl/gl logic and overrides.")
 
-            # Check country settings
-            if country in COUNTRY_SETTINGS:
-                return COUNTRY_SETTINGS[country][setting_type]
+    # 5. Merge Admin1 Names
+    df_limited['admin1_code'] = df_limited['admin1_code'].astype(str)
+    df_limited['country_admin1_key'] = df_limited['country_code'] + '.' + df_limited['admin1_code']
+    df_limited['admin1_name'] = df_limited['country_admin1_key'].map(admin1_map)
+    logging.info("Merged admin1 names into city data.")
+    missing_admin_count = df_limited['admin1_name'].isnull().sum()
+    if missing_admin_count > 0:
+        logging.warning(f"{missing_admin_count} cities did not have a matching admin1 name.")
 
-            # Fallback defaults (e.g., 'en' for hl, country code for gl)
-            return 'en' if setting_type == 'hl' else country
+    # --- REMOVED STEP 6: Get Canonical SerpApi Location String ---
+    # logging.info("Fetching canonical location strings from SerpApi Locations API...")
+    # canonical_locations = []
+    # ... (loop removed)
+    # df_limited['serpapi_location_string'] = canonical_locations
+    # ...
 
-        df_limited['hl'] = df_limited.apply(lambda row: get_setting(row, 'hl'), axis=1)
-        df_limited['gl'] = df_limited.apply(lambda row: get_setting(row, 'gl'), axis=1)
+    # 7. Prepare and Write Output
+    # Select and order columns for output
+    # REMOVED 'serpapi_location_string'
+    output_columns = ['geonameid', 'name', 'asciiname', 'latitude', 'longitude', 'country_code', 'admin1_code', 'admin1_name', 'population', 'timezone', 'hl', 'gl']
+    df_output = df_limited[output_columns]
 
-        # Select and order columns for output (optional, but good practice)
-        output_columns = ['geonameid', 'name', 'asciiname', 'latitude', 'longitude', 'country_code', 'population', 'timezone', 'hl', 'gl']
-        df_output = df_limited[output_columns]
-
-        # Write to comma-separated file with quoting
+    logging.info(f"Writing shortlist to {OUTPUT_CSV_FILE}...")
+    try:
         df_output.to_csv(
-            outfile,
+            OUTPUT_CSV_FILE,
             index=False,
             encoding='utf-8',
-            quoting=csv.QUOTE_ALL # Ensure all fields are quoted
+            quoting=1 # QUOTE_ALL
         )
-        print(f"Successfully created shortlist at {outfile}")
-
-        # Delete the original input file
-        try:
-            infile.unlink()
-            print(f"Successfully deleted input file {infile}")
-        except OSError as e:
-            print(f"Error deleting input file {infile}: {e}")
-
+        logging.info(f"Successfully wrote shortlist to {OUTPUT_CSV_FILE}.")
     except Exception as e:
-        print(f"An error occurred during processing: {e}")
+        logging.error(f"Error writing CSV file: {e}")
+        return
 
+    # 8. Clean up source files
+    try:
+        logging.info(f"Deleting source files: {CITIES_FILE_TXT}, {CITIES_FILE_ZIP}")
+        if os.path.exists(CITIES_FILE_TXT):
+            os.remove(CITIES_FILE_TXT)
+        if os.path.exists(CITIES_FILE_ZIP):
+            os.remove(CITIES_FILE_ZIP)
+        # Keep admin1CodesASCII.txt for future runs
+        logging.info("Cleaned up source files.")
+    except OSError as e:
+        logging.warning(f"Could not delete source file(s): {e}")
 
 if __name__ == "__main__":
-    # Make sure the script resolves paths relative to its own location if run directly
-    script_dir = Path(__file__).parent
-    default_infile = script_dir / "cities15000.txt"
-    default_outfile = script_dir / "cities_shortlist.csv"
-
-    # You might want to add command-line argument parsing here later
-    # For now, it uses the defaults or paths relative to the script dir
-    build_shortlist(infile=default_infile, outfile=default_outfile)
+    build_shortlist()
