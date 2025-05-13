@@ -334,16 +334,13 @@ def main():
                     # 3c. Clean Description
                     if parsed_event.get('description'):
                         summary["rewrite_attempts"] += 1
-                        rewritten_desc = rewrite_description(parsed_event)
-                        if rewritten_desc is not None:
-                             # Only update if rewrite succeeded and is different?
-                             # Maybe check length constraint too?
-                             parsed_event['rewritten_description'] = rewritten_desc 
+                        rewritten_event = rewrite_description(parsed_event)
+                        if rewritten_event and rewritten_event.get('rewritten_description'):
+                            # Use the rewritten description as the main description
+                            parsed_event['description'] = rewritten_event['rewritten_description']
+                            parsed_event['rewritten_description'] = rewritten_event['rewritten_description']
                         else:
-                             logging.warning(f"Failed to rewrite description for event: {parsed_event.get('source_id')}")
-                             # Keep original description or set rewritten to None/empty?
-                             # For now, parsed_event keeps original description if rewrite fails.
-                             parsed_event['rewritten_description'] = None # Explicitly set to None if rewrite fails
+                            parsed_event['rewritten_description'] = None
                     else:
                         parsed_event['rewritten_description'] = None # No original desc to rewrite
 
