@@ -35,11 +35,11 @@ logger = logging.getLogger(__name__)
 
 # Constants
 DEFAULT_MAX_EVENTS_PER_CITY = 100
-DEFAULT_DAYS_FORWARD = 30
+DEFAULT_DAYS_FORWARD = 14
 SERPAPI_TIMEOUT = 60 # seconds for SerpAPI request (Increased from 30)
 SERPAPI_MAX_RETRIES = 5 # Increased from 3
-SERPAPI_BACKOFF_FACTOR = 2 # seconds
-SERPAPI_RESULTS_PER_PAGE = 20 # Standard for Google Events API via SerpApi
+SERPAPI_BACKOFF_FACTOR = 3 # seconds (Increased from 2 to 3)
+SERPAPI_RESULTS_PER_PAGE = 10 # Standard for Google Events API via SerpApi, typically 10 results per page increment
 
 # --- Helper Functions ---
 
@@ -71,43 +71,55 @@ def load_cities(filepath: str, max_cities: Optional[int]) -> List[Dict[str, Any]
 def call_serpapi_with_retry(params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Calls SerpAPI with exponential backoff for retries."""
     retries = 0
-    wait_time = SERPAPI_BACKOFF_FACTOR
+    wait_time = SERPAPI_BACKOFF_FACTOR # Initial wait time
     serpapi_search_url = "https://serpapi.com/search.json"
 
-    while retries <= SERPAPI_MAX_RETRIES:
+    # Loop for retries. Initial attempt is retries=0.
+    # Loop will run for retries = 0, 1, ..., SERPAPI_MAX_RETRIES - 1
+    # This means SERPAPI_MAX_RETRIES number of retry attempts after the first failed one.
+    # Total attempts = 1 (initial) + SERPAPI_MAX_RETRIES
+    while retries <= SERPAPI_MAX_RETRIES: # Changed < to <= to ensure we try exactly SERPAPI_MAX_RETRIES times
         try:
             response = requests.get(serpapi_search_url, params=params, timeout=SERPAPI_TIMEOUT)
             
             if response.status_code == 429: # Rate limit hit
+                # Use retries + 1 for logging because retries is 0-indexed
                 logging.warning(f"SerpAPI rate limit hit (429). Retrying in {wait_time} seconds... ({retries + 1}/{SERPAPI_MAX_RETRIES})")
                 time.sleep(wait_time)
-                wait_time *= SERPAPI_BACKOFF_FACTOR # Exponential backoff
+                wait_time *= SERPAPI_BACKOFF_FACTOR 
                 retries += 1
-                continue # Retry the request
+                continue 
             
-            response.raise_for_status() # Raise HTTPError for other bad responses (4xx or 5xx)
+            response.raise_for_status() 
             
-            # Check for errors indicated in the response body (SerpAPI specific)
             result_json = response.json()
             if "error" in result_json:
                 logging.error(f"SerpAPI returned an error: {result_json['error']}. Params: {params}")
-                return None # Treat API-level error as failure for this call
+                return None 
 
-            return result_json # Success
+            return result_json 
 
         except requests.exceptions.Timeout:
+            # Use retries + 1 for logging
             logging.warning(f"SerpAPI request timed out. Retrying... ({retries + 1}/{SERPAPI_MAX_RETRIES})")
-            time.sleep(wait_time) # Wait before retry on timeout too
+            time.sleep(wait_time) 
+            wait_time *= SERPAPI_BACKOFF_FACTOR
+            retries += 1
+        except requests.exceptions.ConnectionError as e:
+            # Connection errors like ConnectionResetError need to be retried
+            logging.warning(f"SerpAPI connection error: {e}. Retrying in {wait_time} seconds... ({retries + 1}/{SERPAPI_MAX_RETRIES})")
+            time.sleep(wait_time)
             wait_time *= SERPAPI_BACKOFF_FACTOR
             retries += 1
         except requests.exceptions.RequestException as e:
             logging.error(f"SerpAPI request failed: {e}. Params: {params}")
-            return None # Non-retryable request error
+            return None 
         except Exception as e:
             logging.error(f"An unexpected error occurred during SerpAPI call: {e}")
-            return None # Unexpected error
+            return None
             
-    logging.error(f"SerpAPI call failed after {SERPAPI_MAX_RETRIES} retries. Params: {params}")
+    # This log will now be accurate: if loop finishes, all SERPAPI_MAX_RETRIES have been used.
+    logging.error(f"SerpAPI call failed after initial attempt and {SERPAPI_MAX_RETRIES} retries. Params: {params}")
     return None
 
 def upsert_event(supabase: Client, event_data: Dict[str, Any]) -> bool:
@@ -236,7 +248,11 @@ def main():
             summary["total_cities_processed"] += 1
             logging.info(f"Processing city: {city_row.get('name')}, {city_row.get('country_code')}")
             
-            # 1. Build Params
+            all_city_events_raw = []
+            current_page = 0
+            MAX_PAGES_TO_FETCH = 2 # Max 2 pages * 10 results/page = 20 events max
+
+            # 1. Build initial Params
             try:
                 serpapi_params = build_params(city_row)
             except ValueError as e:
@@ -246,33 +262,57 @@ def main():
                  logging.error(f"Unexpected error building params for city {city_row.get('name')}: {e}")
                  continue
 
-            # 2. Call SerpAPI
-            summary["total_serpapi_requests"] += 1
-            serpapi_result = call_serpapi_with_retry(serpapi_params)
+            # Fetch pages (up to MAX_PAGES_TO_FETCH)
+            while current_page < MAX_PAGES_TO_FETCH:
+                # For subsequent pages, update start param
+                if current_page > 0:
+                    serpapi_params['start'] = current_page * SERPAPI_RESULTS_PER_PAGE
+                    # Add a short delay between page requests to avoid connection issues
+                    time.sleep(2)
+                
+                # 2. Call SerpAPI
+                try:
+                    serpapi_results = call_serpapi_with_retry(serpapi_params)
+                    if not serpapi_results:
+                        logging.warning(f"No results returned for page {current_page+1}")
+                        break
+                        
+                    summary["total_serpapi_requests"] += 1
+                    
+                    # 2a. Extract events list
+                    events_results = serpapi_results.get("events_results", [])
+                    if events_results:
+                        all_city_events_raw.extend(events_results)
+                        logging.info(f"Page {current_page+1}: Retrieved {len(events_results)} events for {city_row.get('name')}")
+                    else:
+                        logging.info(f"No events found on page {current_page+1} for {city_row.get('name')}")
+                        break  # No events on this page, so stop requesting more
+                    
+                    # 2b. Check if there are still more events to fetch
+                    has_more_events = len(events_results) >= SERPAPI_RESULTS_PER_PAGE
+                    
+                    # Advance to next page if there are potentially more results
+                    current_page += 1
+                    
+                    # Break if we got fewer results than expected (no more pages)
+                    if not has_more_events:
+                        logging.info(f"No more events for {city_row.get('name')} after page {current_page}")
+                        break
+                        
+                except Exception as e:
+                    logging.error(f"Error fetching events for {city_row.get('name')}: {e}")
+                    summary["serpapi_api_errors"] += 1  # Increment error counter
+                    break  # Skip to next city on error
 
-            if not serpapi_result:
-                summary["serpapi_api_errors"] += 1
-                continue # Skip city if SerpAPI call fails
+            # Process all events for this city
+            summary["events_found"] += len(all_city_events_raw)
+            logging.info(f"Found {len(all_city_events_raw)} total potential events across all pages for {city_row.get('name')}")
 
-            # Track credits (assuming structure from SerpAPI docs)
-            search_info = serpapi_result.get('search_information', {})
-            if isinstance(search_info, dict):
-                 summary["total_serpapi_credits_used"] += search_info.get('credits_used', 0)
-
-            # 3. Parse, Enrich, Clean, Upsert Events
-            events_results = serpapi_result.get('events_results', [])
-            if not events_results:
-                logging.info(f"No events found in SerpAPI result for {city_row.get('name')}")
-                continue
-
-            summary["events_found"] += len(events_results)
-            logging.info(f"Found {len(events_results)} potential events for {city_row.get('name')}")
-
-            for event_raw in events_results:
-                parsed_event = None # Initialize to None
+            for event_idx, event_raw in enumerate(all_city_events_raw, 1):
+                parsed_event = None
                 try:
                     # 3a. Parse
-                    parsed_event = parse_event_result(event_raw, args.days_forward)
+                    parsed_event = parse_event_result(event_raw, args.days_forward, city_row)
                     
                     # If parsing failed or event was filtered out, skip to next event_raw
                     if parsed_event is None:
@@ -306,6 +346,19 @@ def main():
                              parsed_event['rewritten_description'] = None # Explicitly set to None if rewrite fails
                     else:
                         parsed_event['rewritten_description'] = None # No original desc to rewrite
+
+                    # Handle missing values that could cause DB errors
+                    if parsed_event.get('venue') is None:
+                        parsed_event['venue'] = "__VENUE_UNKNOWN__"  # Must have a venue for conflict checks
+                    
+                    # Fix start_time format - Supabase expects timestamp values, not just the time
+                    # If we have start_time but not event_day, set start_time to null
+                    if parsed_event.get('start_time') and not parsed_event.get('event_day'):
+                        parsed_event['start_time'] = None
+                    # If we have both event_day and start_time, format as timestamp
+                    elif parsed_event.get('start_time') and parsed_event.get('event_day'):
+                        # Convert to proper timestamp format: "2023-05-16T14:30:00"
+                        parsed_event['start_time'] = f"{parsed_event['event_day']}T{parsed_event['start_time']}:00"
 
                     # 3d. Upsert to Supabase
                     if upsert_event(supabase, parsed_event):
