@@ -332,17 +332,11 @@ def main():
                         parsed_event = enrich_with_places(parsed_event)
                     
                     # 3c. Clean Description
-                    if parsed_event.get('description'):
-                        summary["rewrite_attempts"] += 1
-                        rewritten_event = rewrite_description(parsed_event)
-                        if rewritten_event and rewritten_event.get('rewritten_description'):
-                            # Use the rewritten description as the main description
-                            parsed_event['description'] = rewritten_event['rewritten_description']
-                            parsed_event['rewritten_description'] = rewritten_event['rewritten_description']
-                        else:
-                            parsed_event['rewritten_description'] = None
-                    else:
-                        parsed_event['rewritten_description'] = None # No original desc to rewrite
+                    # No rewriting or extra fields at this stage; just keep the raw description
+                    # Remove fields not needed at this stage
+                    for field in ["live_band", "class_before", "rewritten_description", "dance_styles"]:
+                        if field in parsed_event:
+                            del parsed_event[field]
 
                     # Handle missing values that could cause DB errors
                     if parsed_event.get('venue') is None:
