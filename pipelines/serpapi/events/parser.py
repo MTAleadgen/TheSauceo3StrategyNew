@@ -2,6 +2,7 @@ from typing import Any, Dict, Optional
 from datetime import datetime, timezone, timedelta
 import hashlib
 import logging
+import re # Ensure re is imported at the top
 
 # Attempt to import dateutil
 try:
@@ -19,37 +20,200 @@ def generate_deterministic_id(link: Optional[str]) -> Optional[str]:
         return hashlib.md5(link.encode('utf-8')).hexdigest()
     return None
 
-def parse_event_result(raw: dict[str, Any], days_forward: int) -> Optional[dict[str, Any]]:
-    """
-    Map ONE SerpAPI events_result item -> DB row.
-    Filters events older than `days_forward`.
-    Generates source_id from the event link.
-    Returns None if the event is filtered out or missing critical fields.
-    """
-    if dateutil_parser is None:
-        raise RuntimeError("python-dateutil library is not available. Cannot parse dates.")
+# 1) Map local month abbreviations → English three-letter
+_MONTH_REPLACEMENTS = {
+    r'\bene\.?\b':   'jan',  # enero
+    r'\bfeb\.?\b':   'feb',
+    r'\bmar\.?\b':   'mar',
+    r'\babr\.?\b':   'apr',  # abril / abril
+    r'\bmai\.?\b':   '5',    # maio / mayo 
+    r'\bmay\.?\b':   '5',    # mayo (English/Spanish)
+    r'\bjun\.?\b':   '6',    # junio/junho
+    r'\bjul\.?\b':   '7',
+    r'\bago\.?\b':   '8',    # agosto
+    r'\bsep(?:t)?\.?\b': '9',
+    r'\boct\.?\b':   '10',
+    r'\bnov\.?\b':   '11',
+    r'\bdez\.?\b':   '12',   # dezembro
+    r'\bdic\.?\b':   '12',   # diciembre
+}
 
-    # --- Extract Basic Fields ---
-    name = raw.get("title")
-    description = raw.get("description")
-    link = raw.get("link")
-    # Use link to generate source_id
-    source_id = generate_deterministic_id(link)
-    
-    # Basic validation - need at least name and a source_id (derived from link)
-    if not name or not source_id:
-        logger.warning(f"Skipping event due to missing title ('{name}') or link (required for source_id). Link: {link}")
+# 2) Strip weekday names in English/Spanish/Portuguese
+_DAY_REPLACEMENTS = [
+    r'\b(dom|domingo)\.?,?', r'\b(lun|lunes)\.?,?', r'\b(mar|martes)\.?,?',
+    r'\b(mi[eé]|miercoles|miércoles)\.?,?', r'\b(jue|jueves)\.?,?',
+    r'\b(vie|viernes)\.?,?', r'\b(sab|s[áa]bado)\.?,?'
+]
+
+# 3) Remove "de" connectors and AM/PM markers
+_DE_PATTERN    = r'\bde\b'
+_AMPM_PATTERN  = r'\b[ap]\.?m\.?\b'
+
+# 4) Remove trailing date-range (everything after "–" or "-")
+_RANGE_PATTERN = r'\s*(?:–|-)\s*.*$'
+
+def _clean_date_string_for_parsing(date_str: str) -> str:
+    """
+    Normalize a raw SerpAPI date string so dateutil.parser.parse()
+    can ingest it.  Returns something like "12 may 2025 19:00".
+    """
+    s = (date_str or "").lower().strip()
+
+    # 1) months
+    for pat, repl in _MONTH_REPLACEMENTS.items():
+        s = re.sub(pat, repl, s)
+
+    # 2) weekdays
+    for pat in _DAY_REPLACEMENTS:
+        s = re.sub(pat, '', s)
+
+    # 3) connectors & AM/PM
+    s = re.sub(_DE_PATTERN, ' ', s)
+    s = re.sub(_AMPM_PATTERN, '', s)
+
+    # 4) drop date-range suffix
+    s = re.sub(_RANGE_PATTERN, '', s)
+
+    # 5) strip punctuation & collapse spaces
+    s = re.sub(r'[\\,\\.\\;]', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+
+    return s
+
+def parse_event_result(event_data: Dict, max_days_forward: int = 365, city_info: Dict = None) -> Optional[Dict]:
+    """Parses a raw event dictionary from SerpAPI into our standardized format.
+    Returns None if the event should be excluded."""
+
+    # 1. Basic validation - must have a name at minimum
+    if not event_data.get('title'):
+        logger.warning("Event without a title/name - skipping")
         return None
 
+    # 2. Extract/compute core fields
+    link = event_data.get('link')
+    source_id = generate_deterministic_id(link)
+
+    # Skip events without valid source ID (rare, but possible)
+    if not source_id:
+        logger.warning(f"Cannot generate source_id for event: {event_data.get('title')}")
+        return None
+
+    # 3. Try to parse dates
+    # Raw date strings to preserve regardless of parsing success
+    raw_start_date = event_data.get('date', {}).get('start_date', '')
+    raw_when = event_data.get('date', {}).get('when', '')
+    
+    # Initialize to None (will remain None if parsing fails)
+    event_day = None
+    start_time = None
+    
+    try:
+        # Apply our cleaning function to both date strings
+        cleaned_start = _clean_date_string_for_parsing(raw_start_date)
+        cleaned_when = _clean_date_string_for_parsing(raw_when)
+        
+        # Combine the two cleaned strings for best chance of parsing
+        # 'when' often has time info that 'start_date' doesn't
+        date_parts = []
+        if cleaned_start:
+            date_parts.append(cleaned_start)
+        if cleaned_when:
+            date_parts.append(cleaned_when)
+            
+        # Combine them with space so dateutil can parse better
+        combined_date_str = ' '.join(date_parts).strip()
+        
+        logger.debug(f"Attempting to parse date: '{combined_date_str}' (from '{raw_start_date}' and '{raw_when}')")
+        
+        if combined_date_str:
+            # Special handling for our numeric month format
+            # Look for patterns like "5 16" (month day) and convert to "5/16/2024"
+            month_day_pattern = r'(\d{1,2})\s+(\d{1,2})'
+            match = re.match(month_day_pattern, combined_date_str)
+            if match:
+                month, day = match.groups()
+                year = datetime.now().year  # Current year
+                reformatted_date = f"{month}/{day}/{year}"
+                try:
+                    dt = datetime.strptime(reformatted_date, "%m/%d/%Y")
+                    event_day = dt.date().isoformat()
+                    
+                    # Try to extract time from the remaining string
+                    time_pattern = r'(\d{1,2}):(\d{2})'
+                    time_match = re.search(time_pattern, combined_date_str)
+                    if time_match:
+                        hour, minute = time_match.groups()
+                        start_time = f"{int(hour):02d}:{minute}"
+                    logger.debug(f"Successfully parsed numeric date: {event_day} {start_time}")
+                except Exception as e:
+                    logger.warning(f"Error parsing numeric date pattern: {e}")
+                    # Fall through to standard parsing below
+            
+            # If we don't have event_day yet, try standard dateutil parsing
+            if not event_day:
+                try:
+                    # Standard dateutil parsing
+                    dt = dateutil_parser.parse(combined_date_str, fuzzy=True)
+                    
+                    # Set the event_day (date portion only)
+                    event_day = dt.date().isoformat()
+                    
+                    # Set start_time (time portion in HH:MM format)
+                    if dt.hour != 0 or dt.minute != 0:  # Only set if we have a non-midnight time
+                        start_time = f"{dt.hour:02d}:{dt.minute:02d}"
+                        
+                    logger.debug(f"Successfully parsed date: {event_day} {start_time}")
+                except Exception as e:
+                    logger.warning(f"Dateutil parse error: {e}")
+    except Exception as e:
+        # If parsing fails, log it but allow event to proceed with nulls
+        error_msg = str(e)
+        logger.warning(f"Date parsing error for event '{event_data.get('title')}': {error_msg}")
+        
+        # Log to date_failures.tsv
+        try:
+            with open('data/date_failures.tsv', 'a', encoding='utf-8') as f:
+                f.write(f"{source_id}\t{raw_start_date}\t{raw_when}\t{error_msg}\n")
+        except Exception as log_error:
+            logger.error(f"Error logging date failure: {log_error}")
+    
+    # 4. Construct the standardized event record
+    event_record = {
+        "source_id": source_id,
+        "source_url": link,
+        "source_platform": "serpapi_google_events",
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "name": event_data.get('title'),
+        "description": event_data.get('description', ''),
+        "event_day": event_day,  # Will be None if parsing failed
+        "start_time": start_time,  # Will be None if parsing failed
+        "raw_start_date": raw_start_date,
+        "raw_when": raw_when, 
+        "end_time": None,  # TODO: Parse end time from raw_when if possible
+        "venue": event_data.get('venue', {}).get('name'),
+        "address": event_data.get('address', []),
+    }
+
+    # --- Enforce max_days_forward filter ---
+    if event_day:
+        try:
+            event_date = datetime.strptime(event_day, "%Y-%m-%d").date()
+            today = datetime.now(timezone.utc).date()
+            if (event_date - today).days > max_days_forward:
+                logger.info(f"Skipping event {event_data.get('title')} on {event_day}: beyond {max_days_forward} days forward.")
+                return None
+        except Exception as e:
+            logger.warning(f"Error checking days forward for event '{event_data.get('title')}': {e}")
+
     # --- Extract Venue/Location ---
-    venue_data = raw.get("venue", {})
+    venue_data = event_data.get("venue", {})
     venue = venue_data.get("name")
-    address_list = raw.get("address", []) # SerpApi often returns address as a list
+    address_list = event_data.get("address", []) # SerpApi often returns address as a list
     address = ", ".join(address_list) if isinstance(address_list, list) else address_list
     
     lat, lng = None, None
-    location_info = raw.get("location_info", {})
-    gps_coords = raw.get("gps_coordinates") or venue_data.get("coordinates") # Check both fields
+    location_info = event_data.get("location_info", {})
+    gps_coords = event_data.get("gps_coordinates") or venue_data.get("coordinates") # Check both fields
     if gps_coords and isinstance(gps_coords, dict):
         lat = gps_coords.get("latitude")
         lng = gps_coords.get("longitude")
@@ -62,133 +226,24 @@ def parse_event_result(raw: dict[str, Any], days_forward: int) -> Optional[dict[
         # except Exception:
         #     pass # Ignore parsing errors
 
-    # --- Extract and Filter Date/Time ---
-    date_info = raw.get("date", {})
-    start_date_str = date_info.get("start_date")
-    when = date_info.get("when") # Often includes time details
-
-    start_dt_utc = None
-    event_day = None
-    end_dt_utc = None # Placeholder for potential end date parsing
-
-    if start_date_str:
-        try:
-            # --- Pre-process date strings for known abbreviations (e.g., Portuguese) ---
-            replacements = {
-                "mai.": "May",
-                "sáb.": "Sat",
-                "dom.": "Sun",
-                # Add other common abbreviations for pt, es, etc. as needed
-                "ene.": "Jan", "feb.": "Feb", "mar.": "Mar", "abr.": "Apr", 
-                "jun.": "Jun", "jul.": "Jul", "ago.": "Aug", "sep.": "Sep", 
-                "oct.": "Oct", "nov.": "Nov", "dic.": "Dec",
-                "lun.": "Mon", "mar.": "Tue", "mié.": "Wed", "jue.": "Thu", "vie.": "Fri",
-                # Consider case insensitivity if needed
-            }
-            processed_start_date_str = start_date_str
-            processed_when_str = when
-            
-            if processed_start_date_str:
-                 for abbr, full in replacements.items():
-                      processed_start_date_str = processed_start_date_str.replace(abbr, full)
-            if processed_when_str:
-                 for abbr, full in replacements.items():
-                      processed_when_str = processed_when_str.replace(abbr, full)
-            # -------------------------------------------------------------------------
-
-            # Use dateutil.parser for flexibility (handles various formats)
-            # Combine start_date with 'when' if 'when' seems to contain time info
-            full_date_str = processed_start_date_str # Use processed string
-            if processed_when_str and ("-" in processed_when_str or ":" in processed_when_str or "AM" in processed_when_str.upper() or "PM" in processed_when_str.upper()):
-                # Basic check if 'when' looks like it includes time
-                 # Combine intelligently, avoiding duplicate date parts if possible
-                if processed_start_date_str not in processed_when_str: 
-                     full_date_str = f"{processed_start_date_str} {processed_when_str}"
-                else:
-                    full_date_str = processed_when_str # Assume 'when' is more complete (and now processed)
-            
-            # Parse the combined string or just start_date
-            # fuzzy=True helps with slightly malformed strings but can be risky
-            dt_obj = dateutil_parser.parse(full_date_str, fuzzy=False) 
-            
-            # Convert to UTC
-            if dt_obj.tzinfo is None:
-                # If naive, *assume* it's local time for the event. 
-                # THIS IS AN ASSUMPTION - SerpApi doesn't always provide timezone.
-                # For filtering, comparing naive datetime to UTC cutoff might be okay
-                # but storing naive time is problematic. Let's convert to UTC
-                # *after* filtering using today's UTC cutoff.
-                 start_dt_local = dt_obj # Keep local for now for filtering logic clarity
-            else:
-                # Convert timezone-aware datetime to UTC
-                start_dt_local = dt_obj # Still consider this local time relative to event location
-                start_dt_utc = dt_obj.astimezone(timezone.utc)
-
-            # --- Date Filtering --- 
-            # Compare using timezone-naive approach against UTC cutoff
-            # This assumes event start times are generally comparable to UTC cutoff date
-            # without complex local timezone lookups, which we don't have.
-            now_utc = datetime.now(timezone.utc)
-            cutoff_utc = now_utc + timedelta(days=days_forward)
-            
-            # Compare date parts only or full datetime? Let's use full datetime.
-            if start_dt_local.replace(tzinfo=None) > cutoff_utc.replace(tzinfo=None):
-                logger.debug(f"Skipping event '{name}' starting {start_date_str} (parsed: {start_dt_local}) - exceeds {days_forward}-day cutoff ({cutoff_utc.date()})")
-                return None # Event is too far in the future
-
-            # If passed filter, ensure we have a UTC datetime for storage
-            if start_dt_utc is None: # If it was naive, convert assuming some default or error out
-                 # We lack original timezone. Cannot accurately convert naive to UTC.
-                 # Option 1: Skip event (safer)
-                 # logger.warning(f"Skipping event '{name}' starting {start_date_str} due to naive datetime and inability to determine timezone.")
-                 # return None 
-                 # Option 2: Assume UTC (potentially incorrect time of day)
-                 logger.warning(f"Assuming UTC for naive start time {start_dt_local} for event '{name}'")
-                 start_dt_utc = start_dt_local.replace(tzinfo=timezone.utc)
-                 
-            event_day = start_dt_utc.date() # Derive event_day from the UTC datetime
-
-        except Exception as e:
-            logger.warning(f"Could not parse date (Original: '{start_date_str}', 'when': '{when}' / Processed: '{full_date_str}') for event '{name}': {e}")
-            # If date parsing fails, we can't filter or set event_day, skip event
-            return None 
-    else:
-         logger.warning(f"Skipping event '{name}' due to missing start_date.")
-         return None # Cannot process without a start date
-
     # --- Assemble Final Record ---
-    # Ensure critical fields for DB are present (adjust based on schema constraints)
-    if not all([event_day, venue, name]): # Check based on new upsert columns
-         logger.warning(f"Skipping event '{name}' (ID: {source_id}) due to missing critical field for upsert: event_day='{event_day}', venue='{venue}', name='{name}'")
+    # Only 'name' and 'source_id' are strictly critical now for initial ingestion.
+    # source_id is derived from link, so check name and link.
+    if not event_data.get('title'): # Link check is implicitly handled by source_id check earlier
+         logger.warning(f"Skipping event because 'name' is missing. Link: {link}")
          return None
 
-    record = {
-        # Identifiers
-        "source_id": source_id,
-        "source_url": link,
-        "retrieved_at": datetime.now(timezone.utc).isoformat(), # Add retrieval timestamp
-
-        # Core Event Info
-        "name": name,
-        "description": description,
-        "event_day": event_day.isoformat() if event_day else None,
-        "start_time": start_dt_utc.isoformat() if start_dt_utc else None,
-        "end_time": end_dt_utc.isoformat() if end_dt_utc else None, # Include if end date is parsed
-
+    event_record.update({
         # Location Info
         "venue": venue,
         "address": address, 
-        "latitude": lat,
-        "longitude": lng,
-
-        # Add raw source data for debugging/future use (optional)
-        # "raw_source_data": raw 
-    }
+        "city": city_info.get("name"),
+        "country": city_info.get("country_code"),
+        "lat": lat,
+        "lng": lng,
+    })
     
-    # Remove keys with None values before returning? Optional.
-    # record = {k: v for k, v in record.items() if v is not None}
-
-    logger.debug(f"Successfully parsed event: {source_id} - {name[:50]}...")
-    return record
+    logger.debug(f"Successfully parsed event: {source_id} - {event_data.get('title')[:50]}...")
+    return event_record
 
 # Removed old if __name__ == '__main__': block 

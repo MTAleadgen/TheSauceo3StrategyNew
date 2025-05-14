@@ -151,4 +151,15 @@ logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
-yarn-error.log* 
+yarn-error.log*
+
+# Custom log/output files
+run_output_parser_restored.log
+run_output.log
+run_summary.json
+data/date_failures.tsv
+
+# Temporary/Reference files (verify if these are needed for LLM context)
+dance-template.json
+LambdaDocs.txt
+SerpAPIdocumentation.txt
