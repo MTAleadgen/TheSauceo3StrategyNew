@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 DEFAULT_MAX_EVENTS_PER_CITY = 100
-DEFAULT_DAYS_FORWARD = 14
+DEFAULT_DAYS_FORWARD = 21
 SERPAPI_TIMEOUT = 60 # seconds for SerpAPI request (Increased from 30)
 SERPAPI_MAX_RETRIES = 5 # Increased from 3
 SERPAPI_BACKOFF_FACTOR = 3 # seconds (Increased from 2 to 3)
@@ -352,6 +352,7 @@ def main():
                         parsed_event['start_time'] = f"{parsed_event['event_day']}T{parsed_event['start_time']}:00"
 
                     # 3d. Upsert to Supabase
+                    logging.info(f"Upserting event: {parsed_event}")
                     if upsert_event(supabase, parsed_event):
                         summary["events_upserted_success"] += 1
                     else:
