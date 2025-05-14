@@ -1,9 +1,14 @@
+from dotenv import load_dotenv
+load_dotenv()
 import os, json, time, backoff, requests
 import logging # Added for logging within the module
+print("DEBUG (qwen_cleaner): LAMBDA_TOKEN =", os.getenv("LAMBDA_TOKEN"))
 
 LAMBDA_ENDPOINT = os.getenv("LAMBDA_QWEN_URL")     # e.g. https://a10.api.lambda.ai/v1/chat/completions
 LAMBDA_TOKEN    = os.getenv("LAMBDA_TOKEN")        # your "Bearer ..." key
 TIMEOUT         = int(os.getenv("LAMBDA_TIMEOUT", 60))
+
+print("DEBUG (qwen_cleaner): LAMBDA_TOKEN (after assignment) =", LAMBDA_TOKEN)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -15,6 +20,7 @@ if LAMBDA_TOKEN:
         "Authorization": f"Bearer {LAMBDA_TOKEN}",
         "Content-Type": "application/json"
     }
+    print("DEBUG (qwen_cleaner): HEADERS =", HEADERS)
 else:
     logger.warning("LAMBDA_TOKEN environment variable not set. LLM Cleaner will be skipped.")
 
@@ -35,7 +41,7 @@ def _call_llm(prompt: str) -> str:
          raise ValueError("Lambda endpoint URL or token not configured.")
          
     payload = {
-        "model": "Qwen3-32B-Chat",        # required by Lambda
+        "model": os.getenv("LAMBDA_QWEN_MODEL", "qwen25-coder-32b-instruct"),
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": prompt.strip()}
