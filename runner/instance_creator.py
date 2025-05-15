@@ -104,8 +104,8 @@ def wait_for_ip(instance_id, poll_interval=5, max_retries=3, retry_delay=5):
             if inst.get("id") == instance_id:
                 status = inst.get("status")
                 ip = inst.get("ip")
-                if status == "running" and ip:
-                    print(f"[✓] Instance is running! IP: {ip}")
+                if status == "active" and ip:
+                    print(f"[✓] Instance is active! IP: {ip}")
                     return ip
                 print(f"[ ] Poll #{poll_count}: status={status}, ip={ip or 'pending'}")
                 found = True
