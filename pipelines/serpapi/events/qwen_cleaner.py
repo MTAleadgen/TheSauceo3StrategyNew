@@ -1,6 +1,8 @@
+import os
 from dotenv import load_dotenv
 load_dotenv()
-import os, json, time, backoff, requests
+print("DEBUG: Using model", os.getenv("LAMBDA_QWEN_MODEL"))
+import json, time, backoff, requests
 import logging # Added for logging within the module
 print("DEBUG (qwen_cleaner): LAMBDA_TOKEN =", os.getenv("LAMBDA_TOKEN"))
 
