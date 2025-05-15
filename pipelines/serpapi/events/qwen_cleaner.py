@@ -34,12 +34,14 @@ SYSTEM_PROMPT = (
     "2. Decide if the event features a live band (true/false).\n"
     "3. Decide if there is a class or lesson before the main event (true/false).\n"
     "4. Extract the event price. If the event is free or has no cost to attend (in any language or phrasing), return 'Free'. If there is a price, return it as stated (including currency symbol or word, or as a range). If no price can be found, return null. Do not return ambiguous words or numbers without a currency or context.\n"
+    "5. Extract the event time range from the raw_when field. Normalize to the format '8:00 p.m. to 1:00 a.m.'. If no time is found, return null.\n"
     "Return your answer as a JSON object with these fields:\n"
     "{\n"
     '  "rewritten_description": "...",\n'
     '  "live_band": true/false,\n'
     '  "class_before": true/false,\n'
-    '  "price": "..." // string or null\n'
+    '  "price": "...", // string or null\n'
+    '  "time": "..." // string or null\n'
     "}"
 )
 
@@ -100,9 +102,10 @@ def enrich_event_with_llm(event: dict) -> dict:
         event_copy["class_before"] = None
         event_copy["name"] = event.get("name")
         event_copy["price"] = event.get("price")
+        event_copy["time"] = None
         return event_copy
 
-    user_message = f"Event title: {event.get('name', '')}\nEvent description: {event.get('description', '')}"
+    user_message = f"Event title: {event.get('name', '')}\nEvent description: {event.get('description', '')}\nEvent raw_when: {event.get('raw_when', '')}"
     payload = {
         "model": os.getenv("LAMBDA_QWEN_MODEL", "qwen25-coder-32b-instruct"),
         "messages": [
@@ -143,6 +146,7 @@ def enrich_event_with_llm(event: dict) -> dict:
                 if not re.search(currency_pattern, price, re.I):
                     price = None
         event_copy["price"] = price
+        event_copy["time"] = llm_result.get("time")
         event_copy["name"] = event.get("name")
         return event_copy
     except Exception as e:
@@ -152,6 +156,7 @@ def enrich_event_with_llm(event: dict) -> dict:
         event_copy["live_band"] = None
         event_copy["class_before"] = None
         event_copy["price"] = event.get("price")
+        event_copy["time"] = None
         event_copy["name"] = event.get("name")
         return event_copy
 

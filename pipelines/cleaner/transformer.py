@@ -118,62 +118,6 @@ def _format_time_human(dt: datetime) -> str:
     return f"{hour} {ampm}"
 
 
-def _extract_time_range_from_raw_when(raw_when: str | None) -> str | None:
-    """
-    Extracts a time range from raw_when and normalizes it to '9:00 p.m. to 1:00 a.m.' format.
-    Returns None if no time found.
-    """
-    if not raw_when:
-        return None
-    # Match patterns like '13:00 – 21:30', '8:00–11:00 p.m.', '21:00 – sáb., 17 de mai., 0', etc.
-    # Accepts both 24h and 12h with am/pm, and various dashes
-    time_pattern = re.compile(r"(\d{1,2}[:h.]\d{2}|\d{1,2})(?:\s*[ap]\.?m\.?)?\s*[–-]\s*(\d{1,2}[:h.]\d{2}|\d{1,2})(?:\s*[ap]\.?m\.?)?", re.I)
-    ampm_pattern = re.compile(r"(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)", re.I)
-
-    # Try to find a time range
-    match = time_pattern.search(raw_when)
-    if match:
-        start, end = match.group(1), match.group(2)
-        # Try to find am/pm for each
-        ampm = ampm_pattern.findall(raw_when)
-        def fmt(t, ampm_val=None):
-            if ':' in t:
-                h, m = t.split(':')
-            elif 'h' in t:
-                h, m = t.split('h')
-            elif '.' in t:
-                h, m = t.split('.')
-            else:
-                h, m = t, '00'
-            h = int(h)
-            m = int(m)
-            # Try to infer am/pm
-            if ampm_val:
-                suffix = ampm_val.lower().replace('.', '')
-                if suffix.startswith('a'):
-                    period = 'a.m.'
-                else:
-                    period = 'p.m.'
-            else:
-                period = ''
-            return f"{h}:{m:02d} {period}".strip()
-        # Assign am/pm if found
-        start_ampm = ampm[0][2] if len(ampm) > 0 else None
-        end_ampm = ampm[1][2] if len(ampm) > 1 else start_ampm
-        start_fmt = fmt(start, start_ampm)
-        end_fmt = fmt(end, end_ampm)
-        return f"{start_fmt} to {end_fmt}"
-    # If only a single time is found
-    ampm_single = ampm_pattern.search(raw_when)
-    if ampm_single:
-        h, m, ap = ampm_single.groups()
-        h = int(h)
-        m = int(m) if m else 0
-        period = 'a.m.' if ap.lower().startswith('a') else 'p.m.'
-        return f"{h}:{m:02d} {period}"
-    return None
-
-
 # ---------------------------------------------------------------------
 # 3.  MAIN ENTRY-POINT
 # ---------------------------------------------------------------------
@@ -204,7 +148,7 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # ---------- times ------------------------------------------------------
     start_ts = _combine_date_time(ev_day, raw.get("start_time"))
     end_ts   = _combine_date_time(ev_day, raw.get("end_time"))
-    time_str = _extract_time_range_from_raw_when(raw.get("raw_when"))
+    time_str = raw.get("time")  # Expect LLM to provide normalized time
 
     # ---------- flags ------------------------------------------------------
     live_band    = raw.get("live_band")
