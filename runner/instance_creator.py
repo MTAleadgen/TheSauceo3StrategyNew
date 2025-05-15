@@ -155,7 +155,7 @@ if __name__ == "__main__":
             if inst_id:
                 instance_id = inst_id
                 break
-            time.sleep(10)
+            time.sleep(8)
         if instance_id:
             print("[+] Successfully launched. Moving on.")
             break
