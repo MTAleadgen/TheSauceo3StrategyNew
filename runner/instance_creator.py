@@ -206,6 +206,6 @@ if __name__ == "__main__":
     # Run clean_events.py
     print(f"[ ] Running clean_events.py on {ip}…")
     subprocess.run(ssh_base + [
-        "cd TheSauceo3StrategyNew && source venv/bin/activate && python runner/clean_events.py"
+        "cd TheSauceo3StrategyNew && source venv/bin/activate && python -m runner.clean_events"
     ], check=True)
     print(f"[✓] Remote instance {ip} is set up and clean_events.py has run.") 
