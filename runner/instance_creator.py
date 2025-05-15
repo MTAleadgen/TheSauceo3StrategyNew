@@ -44,9 +44,7 @@ def create_instance(region, max_retries=3, retry_delay=5):
         try:
             resp = requests.post(f"{LAMBDA_API_URL}/launch", headers=headers, json=payload)
             data = resp.json()
-            print("DEBUG: launch response →", json.dumps(data, indent=2))  # <— inspect this output!
-
-            # Print full response only for unexpected errors
+            # Only print full response for unexpected errors
             if resp.status_code != 200:
                 error_code = data.get("error", {}).get("code")
                 if error_code:
@@ -55,6 +53,7 @@ def create_instance(region, max_retries=3, retry_delay=5):
                         print("DEBUG: launch response →", json.dumps(data, indent=2))
                 else:
                     print(f"Error launching in {region}: {resp.status_code}")
+                    print("DEBUG: launch response →", json.dumps(data, indent=2))
                 return None
 
             # try various paths to the instance ID:
