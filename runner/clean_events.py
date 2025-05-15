@@ -3,7 +3,7 @@ import sys
 import logging
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from pipelines.serpapi.events.qwen_cleaner import rewrite_description
+from pipelines.serpapi.events.qwen_cleaner import enrich_event_with_llm
 from pipelines.cleaner.transformer import transform_event_data
 
 # Setup logging
@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+print("DEBUG: LAMBDA_TOKEN =", os.getenv("LAMBDA_TOKEN"))
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -33,6 +34,7 @@ def get_events(supabase: Client, offset: int, limit: int):
         return []
 
 def upsert_event_clean(supabase: Client, event_clean: dict):
+    print("UPSERT PAYLOAD:", event_clean)  # Debug print to show payload
     try:
         response = supabase.table('events_clean').upsert(event_clean, on_conflict='event_id').execute()
         if hasattr(response, 'data') and response.data:
@@ -57,9 +59,9 @@ def main():
         logger.info(f"Processing batch: {offset} - {offset + len(events) - 1}")
         for event in events:
             try:
-                # Step 1: Rewrite description if present
+                # Step 1: Enrich event with LLM (description, live_band, class_before)
                 if event.get('description'):
-                    event = rewrite_description(event)
+                    event = enrich_event_with_llm(event)
                 # Step 2: Clean/transform event
                 cleaned = transform_event_data(event)
                 if not cleaned:
