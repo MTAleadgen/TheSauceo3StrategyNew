@@ -163,7 +163,7 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "name":             name,
         "dance_styles":     styles,
         "price":            price,
-        "start_time":       _format_time_human(start_ts) if start_ts else None,
+        "start_time":       start_ts.isoformat() if start_ts else None,
         "end_time":         end_ts.isoformat()   if end_ts   else None,
         "live_band":        live_band,
         "class_before":     class_before,

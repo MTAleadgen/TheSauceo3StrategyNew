@@ -179,6 +179,17 @@ if __name__ == "__main__":
     if not wait_for_ssh(ip):
         exit(1)
 
+    # Copy .env file to remote instance
+    print(f"[ ] Copying .env file to {ip}…")
+    scp_cmd = [
+        "scp",
+        "-i", PRIVATE_SSH_KEY_PATH,
+        "-o", "StrictHostKeyChecking=no",
+        os.path.expanduser(".env"),
+        f"ubuntu@{ip}:~/TheSauceo3StrategyNew/.env"
+    ]
+    subprocess.run(scp_cmd, check=True)
+
     # ── SSH in, install dependencies, pull repo, and run clean_events.py ──
     print(f"[ ] Installing dependencies and pulling repo on {ip}…")
     ssh_base = [
