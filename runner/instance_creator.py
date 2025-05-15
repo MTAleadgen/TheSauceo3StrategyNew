@@ -46,10 +46,13 @@ def create_instance(region, max_retries=3, retry_delay=5):
             data = resp.json()
             print("DEBUG: launch response →", json.dumps(data, indent=2))  # <— inspect this output!
 
+            # Print full response only for unexpected errors
             if resp.status_code != 200:
                 error_code = data.get("error", {}).get("code")
                 if error_code:
                     print(f"Error launching in {region}: {resp.status_code} {error_code}")
+                    if error_code not in ["instance-operations/launch/insufficient-capacity"]:
+                        print("DEBUG: launch response →", json.dumps(data, indent=2))
                 else:
                     print(f"Error launching in {region}: {resp.status_code}")
                 return None
