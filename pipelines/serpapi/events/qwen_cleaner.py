@@ -4,6 +4,7 @@ load_dotenv()
 print("DEBUG: Using model", os.getenv("LAMBDA_QWEN_MODEL"))
 import json, time, backoff, requests
 import logging # Added for logging within the module
+import re # Added for regular expression operations
 print("DEBUG (qwen_cleaner): LAMBDA_TOKEN =", os.getenv("LAMBDA_TOKEN"))
 
 LAMBDA_ENDPOINT = os.getenv("LAMBDA_QWEN_URL")     # e.g. https://a10.api.lambda.ai/v1/chat/completions
@@ -32,7 +33,7 @@ SYSTEM_PROMPT = (
     "1. Rewrite the event description to be concise (≤ 120 words), clear, and conversational. No ALL-CAPS, no unnecessary emojis.\n"
     "2. Decide if the event features a live band (true/false).\n"
     "3. Decide if there is a class or lesson before the main event (true/false).\n"
-    "4. Extract the event price (as a single value or a range, e.g., '$5' or '$5-$10'). If no price is found, return null.\n"
+    "4. Extract the event price ONLY if it is 'Free' or a number with a $ or other currency symbol in front of it (e.g., '$5', '€10', 'R$20', '£8', or 'Free'). If no such price is found, return null. Do NOT return numbers without a currency symbol.\n"
     "Return your answer as a JSON object with these fields:\n"
     "{\n"
     '  "rewritten_description": "...",\n'
@@ -121,7 +122,17 @@ def enrich_event_with_llm(event: dict) -> dict:
         event_copy["description"] = llm_result.get("rewritten_description")
         event_copy["live_band"] = llm_result.get("live_band")
         event_copy["class_before"] = llm_result.get("class_before")
-        event_copy["price"] = llm_result.get("price")
+        # Post-process price to ensure only valid values are accepted
+        price = llm_result.get("price")
+        if isinstance(price, str):
+            price = price.strip()
+            if not (price.lower() == "free" or re.match(r"^(r\$|us?\$|\$|€|£)\s*\d+", price, re.I)):
+                price = None
+        elif price is not None:
+            price = str(price)
+            if not (price.lower() == "free" or re.match(r"^(r\$|us?\$|\$|€|£)\s*\d+", price, re.I)):
+                price = None
+        event_copy["price"] = price
         event_copy["name"] = event.get("name")
         return event_copy
     except Exception as e:
