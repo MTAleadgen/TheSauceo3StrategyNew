@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 import subprocess
 import json
 from requests.exceptions import ConnectionError
+import socket
+import platform
 
 load_dotenv()
 
@@ -13,7 +15,7 @@ LAMBDA_API_KEY = os.getenv("LAMBDA_API_KEY")
 GPU_INSTANCE_TYPE = os.getenv("GPU_INSTANCE_TYPE", "gpu_1x_a10")
 SSH_KEY_NAME = os.getenv("SSH_KEY_NAME")
 SSH_KEY = os.getenv("SSH_KEY")
-PRIVATE_SSH_KEY_PATH = os.path.expanduser(os.getenv("PRIVATE_SSH_KEY_PATH", "~/.ssh/TheSauce"))
+PRIVATE_SSH_KEY_PATH = os.path.expanduser(os.getenv("PRIVATE_SSH_KEY_PATH", "~/.ssh/TheSauceNew"))
 
 # Configurable parameters
 REGIONS = [
@@ -45,7 +47,11 @@ def create_instance(region, max_retries=3, retry_delay=5):
             print("DEBUG: launch response →", json.dumps(data, indent=2))  # <— inspect this output!
 
             if resp.status_code != 200:
-                print(f"Error launching in {region}: {resp.status_code} {resp.text}")
+                error_code = data.get("error", {}).get("code")
+                if error_code:
+                    print(f"Error launching in {region}: {resp.status_code} {error_code}")
+                else:
+                    print(f"Error launching in {region}: {resp.status_code}")
                 return None
 
             # try various paths to the instance ID:
@@ -110,7 +116,35 @@ def wait_for_ip(instance_id, poll_interval=5, max_retries=3, retry_delay=5):
             print(f"[ ] Instance {instance_id} not found in API response yet.")
         time.sleep(poll_interval)
 
+def wait_for_ssh(ip, port=22, attempts=30, poll_interval=10):
+    print(f"[WAIT] Waiting for SSH to become available at {ip}...")
+    for attempt in range(1, attempts + 1):
+        try:
+            with socket.create_connection((ip, port), timeout=5):
+                print(f"[+] SSH is available at {ip}")
+                return True
+        except Exception:
+            print(f"[WAIT] SSH not ready at {ip}, attempt {attempt}/{attempts}, retrying in {poll_interval}s...")
+            time.sleep(poll_interval)
+    print(f"[ERROR] SSH did not become available at {ip} after {attempts * poll_interval} seconds.")
+    return False
+
+def run_in_wsl():
+    print("[WSL] Detected Windows, running setup in WSL...")
+    wsl_commands = [
+        "cd /mnt/c/Users/ashdo/OneDrive/Desktop/Applicaitons/TheSauceo3PlanNew",
+        "python3 -m venv venv",
+        "source venv/bin/activate",
+        "python runner/instance_creator.py"
+    ]
+    # Join commands with '&&' so they run in a single shell
+    wsl_command = " && ".join(wsl_commands)
+    subprocess.run(["wsl", "bash", "-c", wsl_command], check=True)
+
 if __name__ == "__main__":
+    if platform.system() == "Windows":
+        run_in_wsl()
+        exit(0)
     if not LAMBDA_API_KEY or not SSH_KEY_NAME:
         print("Missing required environment variables. Please set LAMBDA_API_KEY and SSH_KEY_NAME.")
         exit(1)
@@ -137,6 +171,10 @@ if __name__ == "__main__":
 
     # ── At this point we have instance_id, now wait for its IP ──
     ip = wait_for_ip(instance_id)
+
+    # Wait for SSH to become available
+    if not wait_for_ssh(ip):
+        exit(1)
 
     # ── SSH in, install dependencies, pull repo, and run clean_events.py ──
     print(f"[ ] Installing dependencies and pulling repo on {ip}…")

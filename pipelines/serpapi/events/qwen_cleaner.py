@@ -28,11 +28,18 @@ else:
 
 
 SYSTEM_PROMPT = (
-    "You are an editor.  Rewrite the event description so it is:\n"
-    "• concise (≤ 120 words)\n"
-    "• written in clear conversational English\n"
-    "• no ALL-CAPS, no unnecessary emojis\n"
-    "Return **only** the rewritten text."
+    "You are an event data processor. For the event below, do the following:\n"
+    "1. Rewrite the event description to be concise (≤ 120 words), clear, and conversational. No ALL-CAPS, no unnecessary emojis.\n"
+    "2. Decide if the event features a live band (true/false).\n"
+    "3. Decide if there is a class or lesson before the main event (true/false).\n"
+    "4. Extract the event price (as a single value or a range, e.g., '$5' or '$5-$10'). If no price is found, return null.\n"
+    "Return your answer as a JSON object with these fields:\n"
+    "{\n"
+    '  "rewritten_description": "...",\n'
+    '  "live_band": true/false,\n'
+    '  "class_before": true/false,\n'
+    '  "price": "..." // string or null\n'
+    "}"
 )
 
 @backoff.on_exception(backoff.expo,
@@ -83,51 +90,49 @@ def _call_llm(prompt: str) -> str:
 
 
 # ----------------------------------------------------------------------
-def rewrite_description(event: dict) -> dict:
-    """Return a clone of *event* with `rewritten_description` filled in."""
-    
-    # Check prerequisites
+def enrich_event_with_llm(event: dict) -> dict:
     if not LAMBDA_ENDPOINT or not HEADERS:
-         logger.warning("Skipping LLM rewrite: Endpoint or Token not configured.")
-         # Ensure field exists but is None if skipped
-         event_copy = event.copy()
-         event_copy["rewritten_description"] = None 
-         return event_copy
-         
-    original_description = event.get("description")
-    if not original_description or not isinstance(original_description, str) or not original_description.strip():
-        logger.debug(f"Skipping LLM rewrite: No valid original description found for event {event.get('source_id') or event.get('name')}")
-        # Ensure field exists but is None if skipped
+        logger.warning("Skipping LLM enrichment: Endpoint or Token not configured.")
         event_copy = event.copy()
-        event_copy["rewritten_description"] = None
+        event_copy["description"] = event.get("description")
+        event_copy["live_band"] = None
+        event_copy["class_before"] = None
+        event_copy["name"] = event.get("name")
+        event_copy["price"] = event.get("price")
         return event_copy
 
-    event_copy = event.copy() # Start with a copy
+    user_message = f"Event title: {event.get('name', '')}\nEvent description: {event.get('description', '')}"
+    payload = {
+        "model": os.getenv("LAMBDA_QWEN_MODEL", "qwen25-coder-32b-instruct"),
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 512,
+    }
+    r = requests.post(LAMBDA_ENDPOINT, headers=HEADERS, json=payload, timeout=TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    content = data["choices"][0]["message"]["content"].strip()
     try:
-        logger.info(f"Rewriting description for event: {event_copy.get('source_id') or event_copy.get('name')}")
-        rewritten = _call_llm(original_description)
-        
-        if rewritten:
-            # Only update if we got a non-empty response
-            event_copy["rewritten_description"] = rewritten 
-            logger.info(f"Successfully rewritten description for event: {event_copy.get('source_id') or event_copy.get('name')}")
-        else:
-            # If _call_llm returned empty string due to empty response
-            event_copy["rewritten_description"] = None
-            logger.warning(f"LLM returned empty description for event: {event_copy.get('source_id') or event_copy.get('name')}")
-
-    except ValueError as e: # Catch config or parsing errors from _call_llm
-         logger.error(f"Configuration or parsing error during LLM rewrite for event {event_copy.get('source_id')}: {e}")
-         event_copy["rewritten_description"] = None # Set to None on failure
-    except requests.exceptions.RequestException as e: # Catch network/HTTP errors after retries
-        logger.error(f"HTTP/Network error calling LLM for event {event_copy.get('source_id')}: {e}")
-        event_copy["rewritten_description"] = None # Set to None on failure
-    except Exception as exc: # Catch any other unexpected errors
-        # leave the original description, but log for later inspection
-        logger.error(f"[qwen_cleaner] LLM call failed unexpectedly for event {event_copy.get('source_id')}: {exc}", exc_info=True)
-        event_copy["rewritten_description"] = None # Set to None on failure
-
-    return event_copy
+        llm_result = json.loads(content)
+        event_copy = event.copy()
+        event_copy["description"] = llm_result.get("rewritten_description")
+        event_copy["live_band"] = llm_result.get("live_band")
+        event_copy["class_before"] = llm_result.get("class_before")
+        event_copy["price"] = llm_result.get("price")
+        event_copy["name"] = event.get("name")
+        return event_copy
+    except Exception as e:
+        logger.error(f"Failed to parse LLM JSON: {e}, content: {content}")
+        event_copy = event.copy()
+        event_copy["description"] = event.get("description")
+        event_copy["live_band"] = None
+        event_copy["class_before"] = None
+        event_copy["price"] = event.get("price")
+        event_copy["name"] = event.get("name")
+        return event_copy
 
 # Example Usage (Optional - requires LAMBDA_QWEN_URL and LAMBDA_TOKEN in env)
 if __name__ == '__main__':
@@ -170,21 +175,21 @@ if __name__ == '__main__':
 
         print("\n--- Rewriting description for sample_event ---")
         start_t = time.time()
-        rewritten_event = rewrite_description(sample_event) # No need to copy here, function does it
+        rewritten_event = enrich_event_with_llm(sample_event) # No need to copy here, function does it
         end_t = time.time()
         print(f"LLM Call took: {end_t - start_t:.2f}s")
         print("Original Description:", sample_event.get('description'))
-        print("Rewritten Description:", rewritten_event.get('rewritten_description'))
+        print("Rewritten Description:", rewritten_event.get('description'))
 
         print("\n--- Rewriting description for sample_event_empty_desc ---")
-        rewritten_event_empty = rewrite_description(sample_event_empty_desc)
+        rewritten_event_empty = enrich_event_with_llm(sample_event_empty_desc)
         print("Original Description:", sample_event_empty_desc.get('description'))
-        print("Rewritten Description:", rewritten_event_empty.get('rewritten_description'))
+        print("Rewritten Description:", rewritten_event_empty.get('description'))
         
         print("\n--- Rewriting description for sample_event_no_desc_key ---")
-        rewritten_event_no_desc = rewrite_description(sample_event_no_desc_key)
+        rewritten_event_no_desc = enrich_event_with_llm(sample_event_no_desc_key)
         print("Original Description:", sample_event_no_desc_key.get('description'))
-        print("Rewritten Description:", rewritten_event_no_desc.get('rewritten_description'))
+        print("Rewritten Description:", rewritten_event_no_desc.get('description'))
 
 
         # Example of how an error might be handled (simulating bad endpoint)
@@ -192,8 +197,8 @@ if __name__ == '__main__':
         original_endpoint = LAMBDA_ENDPOINT
         LAMBDA_ENDPOINT = "http://invalid-url-that-does-not-exist" 
         try:
-             error_event = rewrite_description(sample_event)
-             print("Rewritten Description (should be None):", error_event.get('rewritten_description'))
+             error_event = enrich_event_with_llm(sample_event)
+             print("Rewritten Description (should be None):", error_event.get('description'))
         except Exception as e:
             print(f"Caught expected exception: {e}") # Backoff might retry
         finally:    
@@ -206,8 +211,8 @@ if __name__ == '__main__':
             "Content-Type": "application/json"
         }
         try:
-             error_event_token = rewrite_description(sample_event)
-             print("Rewritten Description (should be None):", error_event_token.get('rewritten_description'))
+             error_event_token = enrich_event_with_llm(sample_event)
+             print("Rewritten Description (should be None):", error_event_token.get('description'))
         except Exception as e:
              print(f"Caught expected exception (might be HTTP 401/403 after retries): {e}")
         finally:

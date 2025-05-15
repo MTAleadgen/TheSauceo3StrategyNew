@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, date, time
 from typing import Any, Dict, List, Tuple, Optional
+import pytz
 
 from dateutil.parser import parse as dt_parse
 
@@ -106,6 +107,17 @@ def _combine_date_time(ev_day: Any, ts: Any) -> Optional[datetime]:
     return None
 
 
+def _format_time_human(dt: datetime) -> str:
+    if not dt:
+        return None
+    # Convert to local time if tz-aware, else use as is
+    if dt.tzinfo:
+        dt = dt.astimezone()
+    hour = dt.hour % 12 or 12
+    ampm = 'a.m.' if dt.hour < 12 else 'p.m.'
+    return f"{hour} {ampm}"
+
+
 # ---------------------------------------------------------------------
 # 3.  MAIN ENTRY-POINT
 # ---------------------------------------------------------------------
@@ -121,11 +133,8 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     ev_day = raw.get("event_day")          # may be str or date
 
     # ---------- description ------------------------------------------------
-    description = (
-        raw.get("rewritten_description")
-        or raw.get("description")
-        or ""
-    ).strip()
+    description = raw.get("description", "").strip()
+    name = raw.get("name", "")
 
     # ---------- dance styles ----------------------------------------------
     styles = raw.get("dance_styles") or _extract_styles(
@@ -136,17 +145,14 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not styles:
         return None
 
-    # ---------- prices -----------------------------------------------------
-    price_min, price_max = _extract_price(raw.get("price") or description)
-
     # ---------- times ------------------------------------------------------
     start_ts = _combine_date_time(ev_day, raw.get("start_time"))
     end_ts   = _combine_date_time(ev_day, raw.get("end_time"))
 
     # ---------- flags ------------------------------------------------------
-    text_all = f"{raw.get('name', '')} {description}".lower()
-    live_band    = bool(_LIVE_BAND_RE.search(text_all))
-    class_before = bool(_CLASS_RE.search(text_all))
+    live_band    = raw.get("live_band")
+    class_before = raw.get("class_before")
+    price        = raw.get("price")
 
     # ----------------------------------------------------------------------
     cleaned: Dict[str, Any] = {
@@ -154,10 +160,10 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "cleaned_at": datetime.utcnow().isoformat(timespec="seconds"),
 
         "description":      description,
+        "name":             name,
         "dance_styles":     styles,
-        "price_min":        price_min,
-        "price_max":        price_max,
-        "start_time":       start_ts.isoformat() if start_ts else None,
+        "price":            price,
+        "start_time":       _format_time_human(start_ts) if start_ts else None,
         "end_time":         end_ts.isoformat()   if end_ts   else None,
         "live_band":        live_band,
         "class_before":     class_before,
@@ -166,6 +172,8 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "venue":            raw.get("venue"),
         "address":          raw.get("address"),
         "event_day":        ev_day,
+        "country":          raw.get("country"),
+        "city":             raw.get("city"),
     }
 
     return cleaned 
