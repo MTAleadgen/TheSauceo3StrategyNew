@@ -33,7 +33,7 @@ SYSTEM_PROMPT = (
     "1. Rewrite the event description to be concise (≤ 120 words), clear, and conversational. No ALL-CAPS, no unnecessary emojis.\n"
     "2. Decide if the event features a live band (true/false).\n"
     "3. Decide if there is a class or lesson before the main event (true/false).\n"
-    "4. Extract the event price ONLY if it is 'Free' (including synonyms like 'gratis', 'entrada gratuita', 'entrada libre', etc.—normalize all to 'Free'), or a number or range with a $ or other currency symbol in front of it (e.g., '$5', '€10', 'R$20', '£8', '$5-$10', 'R$10–R$20', '€5–10'). If no such price is found, return null. Do NOT return numbers without a currency symbol or ambiguous words.\n"
+    "4. Extract the event price ONLY if it is 'Free' (including synonyms like 'gratis', 'entrada gratuita', 'entrada libre', etc.—normalize all to 'Free'), or a number or range with a $ or other currency symbol in front of it (e.g., '$5', '€10', 'R$20', '£8', '$5-$10', 'R$10–R$20', '€5–10'), or a number/range with a spelled-out currency word (e.g., '5 dollars', '10–20 euros', 'R$10–R$20', '5 pounds', '10 reais'). If a spelled-out currency word is found, normalize it to the appropriate symbol (e.g., '5 dollars' → '$5'). If no such price is found, return null. Do NOT return numbers without a currency symbol or ambiguous words.\n"
     "Return your answer as a JSON object with these fields:\n"
     "{\n"
     '  "rewritten_description": "...",\n'
@@ -129,15 +129,35 @@ def enrich_event_with_llm(event: dict) -> dict:
             # Normalize synonyms for free
             if price.lower() in ["free", "gratis", "entrada gratuita", "entrada libre", "gratuito", "libre"]:
                 price = "Free"
-            # Accept currency with number or range
-            elif not re.match(r"^(r\$|us?\$|\$|€|£)\s*\d+([–-]\d+)?", price, re.I):
-                price = None
+            else:
+                # Normalize spelled-out currency words to symbols
+                currency_map = {
+                    r"\\b(dollars?|usd)\\b": "$",
+                    r"\\b(euros?|eur)\\b": "€",
+                    r"\\b(reais|real|brl)\\b": "R$",
+                    r"\\b(pounds?|gbp)\\b": "£",
+                }
+                for word, symbol in currency_map.items():
+                    # Replace e.g. '5 dollars' or '5-10 dollars' with '$5' or '$5-$10'
+                    price = re.sub(rf"(\d+[–-]?\d*)\s*{word}", lambda m: f"{symbol}{m.group(1)}", price, flags=re.I)
+                # Accept currency with number or range (symbol or normalized)
+                if not re.match(r"^(r\\$|us?\\$|\\$|€|£)\\s*\\d+([–-]\\d+)?", price, re.I) and price != "Free":
+                    price = None
         elif price is not None:
             price = str(price)
             if price.lower() in ["free", "gratis", "entrada gratuita", "entrada libre", "gratuito", "libre"]:
                 price = "Free"
-            elif not re.match(r"^(r\$|us?\$|\$|€|£)\s*\d+([–-]\d+)?", price, re.I):
-                price = None
+            else:
+                currency_map = {
+                    r"\\b(dollars?|usd)\\b": "$",
+                    r"\\b(euros?|eur)\\b": "€",
+                    r"\\b(reais|real|brl)\\b": "R$",
+                    r"\\b(pounds?|gbp)\\b": "£",
+                }
+                for word, symbol in currency_map.items():
+                    price = re.sub(rf"(\d+[–-]?\d*)\s*{word}", lambda m: f"{symbol}{m.group(1)}", price, flags=re.I)
+                if not re.match(r"^(r\\$|us?\\$|\\$|€|£)\\s*\\d+([–-]\\d+)?", price, re.I) and price != "Free":
+                    price = None
         event_copy["price"] = price
         event_copy["name"] = event.get("name")
         return event_copy
