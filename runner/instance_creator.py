@@ -62,7 +62,6 @@ def create_instance(region, max_retries=3, retry_delay=5):
                 return None
 
             print(f"[+] Launched {GPU_INSTANCE_TYPE} in {region}, instance_id={instance_id}")
-            print(f"[MANUAL COPY] Instance ID for termination: {instance_id}")
             return instance_id
         except ConnectionError as e:
             print(f"[!] Network error (attempt {attempt}/{max_retries}): {e}")
@@ -73,9 +72,12 @@ def create_instance(region, max_retries=3, retry_delay=5):
                 print("[!] Max retries reached. Giving up on this region.")
                 return None
 
-def wait_for_ip(instance_id, poll_interval=5, max_retries=30, retry_delay=5):
+def wait_for_ip(instance_id, poll_interval=5, max_retries=3, retry_delay=5):
     print(f"[…] Waiting for public IP of instance {instance_id} …")
+    poll_count = 0
     while True:
+        poll_count += 1
+        print(f"[ ] Poll #{poll_count}: Checking instance status…")
         for attempt in range(1, max_retries + 1):
             try:
                 r = requests.get("https://cloud.lambdalabs.com/api/v1/instances", headers=headers)
@@ -89,14 +91,23 @@ def wait_for_ip(instance_id, poll_interval=5, max_retries=30, retry_delay=5):
                 else:
                     print("[!] Max retries reached while polling for IP. Exiting.")
                     raise
+        # Print the full response for debugging
+        print("[DEBUG] Full API response:")
+        try:
+            print(json.dumps(r.json(), indent=2))
+        except Exception as e:
+            print(f"[DEBUG] Could not decode JSON response: {e}")
+        found = False
         for inst in r.json().get("data", []):
+            print(f"[DEBUG] Instance: id={inst.get('id')}, status={inst.get('status')}, ip={inst.get('ip')}")
             if inst.get("id") == instance_id:
-                status = inst.get("status", "unknown")
-                ip = inst.get("ipv4") or inst.get("ip")
-                print(f"[WAIT] Instance {instance_id} status: {status}, IP: {ip}")
-                if ip:
+                if inst.get("ip"):
+                    ip = inst["ip"]
                     print(f"[+] Instance {instance_id} is up at {ip}")
                     return ip
+                found = True
+        if not found:
+            print(f"[ ] Instance {instance_id} not found in API response yet.")
         time.sleep(poll_interval)
 
 if __name__ == "__main__":
@@ -127,58 +138,29 @@ if __name__ == "__main__":
     # ── At this point we have instance_id, now wait for its IP ──
     ip = wait_for_ip(instance_id)
 
-    # ── Copy bootstrap script up and run it remotely ──
-    print(f"[ ] Uploading setup script to {ip}…")
-    subprocess.run([
-        "scp",
-        "-i", PRIVATE_SSH_KEY_PATH,
-        "-o", "StrictHostKeyChecking=no",
-        "scripts/setup_gpu_instance.sh",
-        f"ubuntu@{ip}:/home/ubuntu/"
-    ], check=True)
-
-    print(f"[ ] Running bootstrap on remote…")
-    subprocess.run([
+    # ── SSH in, install dependencies, pull repo, and run clean_events.py ──
+    print(f"[ ] Installing dependencies and pulling repo on {ip}…")
+    ssh_base = [
         "ssh",
         "-i", PRIVATE_SSH_KEY_PATH,
         "-o", "StrictHostKeyChecking=no",
-        f"ubuntu@{ip}",
-        "bash /home/ubuntu/setup_gpu_instance.sh"
+        f"ubuntu@{ip}"
+    ]
+    # Update and install system deps, python, git, venv
+    subprocess.run(ssh_base + [
+        "sudo apt-get update && sudo apt-get install -y python3 python3-pip python3-venv git"
     ], check=True)
-
-    # ── Copy .env file up to the instance ──
-    print(f"[ ] Uploading .env to {ip}…")
-    subprocess.run([
-        "scp",
-        "-i", PRIVATE_SSH_KEY_PATH,
-        "-o", "StrictHostKeyChecking=no",
-        ".env",
-        f"ubuntu@{ip}:/home/ubuntu/TheSauceo3StrategyNew/.env"
+    # Clone or pull repo
+    subprocess.run(ssh_base + [
+        "if [ ! -d TheSauceo3StrategyNew ]; then git clone https://github.com/MTAleadgen/TheSauceo3StrategyNew.git; else cd TheSauceo3StrategyNew && git pull && cd ..; fi"
     ], check=True)
-    print(f"[✓] .env uploaded to instance.")
-
-    # ── Run clean_events.py on the remote instance ──
-    print(f"[ ] Running clean_events.py on remote instance…")
-    subprocess.run([
-        "ssh",
-        "-i", PRIVATE_SSH_KEY_PATH,
-        "-o", "StrictHostKeyChecking=no",
-        f"ubuntu@{ip}",
+    # Set up venv and install requirements
+    subprocess.run(ssh_base + [
+        "cd TheSauceo3StrategyNew && python3 -m venv venv && source venv/bin/activate && pip install --upgrade pip && pip install -r requirements.txt"
+    ], check=True)
+    # Run clean_events.py
+    print(f"[ ] Running clean_events.py on {ip}…")
+    subprocess.run(ssh_base + [
         "cd TheSauceo3StrategyNew && source venv/bin/activate && python runner/clean_events.py"
     ], check=True)
-    print(f"[✓] clean_events.py completed on remote instance.")
-
-    # ── Terminate the instance automatically ──
-    print(f"[ ] Terminating instance {instance_id}...")
-    terminate_url = "https://cloud.lambdalabs.com/api/v1/instance-operations/terminate"
-    terminate_headers = {"Authorization": f"Bearer {LAMBDA_API_KEY}"}
-    terminate_payload = {"instance_id": instance_id}
-    try:
-        resp = requests.post(terminate_url, headers=terminate_headers, json=terminate_payload)
-        print(f"[✓] Termination request sent. Status: {resp.status_code}")
-        print(resp.text)
-    except Exception as e:
-        print(f"[!] Failed to terminate instance: {e}")
-
-    print(f"[✓] Remote instance is ready at {ip} (and termination requested).")
-    print(f"[MANUAL COPY] Instance ID for termination: {instance_id}") 
+    print(f"[✓] Remote instance {ip} is set up and clean_events.py has run.") 
