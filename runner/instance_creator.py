@@ -23,8 +23,8 @@ REGIONS = [
     "us-east-1", "us-east-2", "us-midwest-1", "europe-central-1", "asia-northeast-1",
     "asia-northeast-2", "asia-south-1", "me-west-1"
 ]
-OUTER_TRIES = 5  # Number of times to repeat the region cycle
-PAUSE_BETWEEN_CYCLES = 300  # Seconds to wait between cycles
+OUTER_TRIES = 30  # Number of times to repeat the region cycle
+PAUSE_BETWEEN_CYCLES = 215  # Seconds to wait between cycles
 
 # Note: This script is intended to be run from WSL or Linux. Activate your venv before running:
 # source /path/to/venv/bin/activate
