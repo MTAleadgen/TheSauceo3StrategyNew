@@ -157,23 +157,23 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # ----------------------------------------------------------------------
     cleaned: Dict[str, Any] = {
         "event_id":  raw.get("id") or raw.get("event_id"),
-        "cleaned_at": datetime.utcnow().isoformat(timespec="seconds"),
-
         "description":      description,
         "name":             name,
         "dance_styles":     styles,
         "price":            price,
-        "start_time":       start_ts.isoformat() if start_ts else None,
-        "end_time":         end_ts.isoformat()   if end_ts   else None,
         "live_band":        live_band,
         "class_before":     class_before,
-
         # NEW passthrough columns ------------------------------------------
         "venue":            raw.get("venue"),
         "address":          raw.get("address"),
         "event_day":        ev_day,
         "country":          raw.get("country"),
         "city":             raw.get("city"),
+        # Add lat/lng passthrough
+        "lat":              raw.get("lat"),
+        "lng":              raw.get("lng"),
+        # Add source_url passthrough
+        "source_url":       raw.get("source_url"),
     }
 
     return cleaned 

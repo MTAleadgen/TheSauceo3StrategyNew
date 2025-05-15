@@ -186,10 +186,8 @@ def parse_event_result(event_data: Dict, max_days_forward: int = 365, city_info:
         "name": event_data.get('title'),
         "description": event_data.get('description', ''),
         "event_day": event_day,  # Will be None if parsing failed
-        "start_time": start_time,  # Will be None if parsing failed
         "raw_start_date": raw_start_date,
         "raw_when": raw_when, 
-        "end_time": None,  # TODO: Parse end time from raw_when if possible
         "venue": event_data.get('venue', {}).get('name'),
         "address": event_data.get('address', []),
     }

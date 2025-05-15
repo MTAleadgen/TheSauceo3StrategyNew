@@ -13,6 +13,7 @@ import math # For pagination
 import backoff # For retries
 from requests.exceptions import RequestException # Specific exception for backoff
 from pipelines.serpapi.events.qwen_cleaner import rewrite_description
+from datetime import datetime
 
 # Dynamically adjust path to import pipeline modules
 # Assuming runner/cli.py is run from the project root (e.g., python -m runner.cli)
@@ -160,6 +161,17 @@ def send_email(summary_data: Dict[str, Any]):
     # Example: print JSON to log for now
     logging.debug(f"Email Summary Data:\n{json.dumps(summary_data, indent=2, default=str)}")
     pass
+
+def delete_past_events(supabase: Client):
+    """Delete events from both 'events' and 'events_clean' tables where event_day is before today."""
+    today = datetime.utcnow().date().isoformat()
+    for table in ['events', 'events_clean']:
+        try:
+            response = supabase.table(table).delete().lt('event_day', today).execute()
+            deleted_count = len(response.data) if hasattr(response, 'data') and response.data else 0
+            logger.info(f"Deleted {deleted_count} past events from {table}.")
+        except Exception as e:
+            logger.error(f"Error deleting past events from {table}: {e}")
 
 # --- Main Execution --- 
 
@@ -342,14 +354,8 @@ def main():
                     if parsed_event.get('venue') is None:
                         parsed_event['venue'] = "__VENUE_UNKNOWN__"  # Must have a venue for conflict checks
                     
-                    # Fix start_time format - Supabase expects timestamp values, not just the time
-                    # If we have start_time but not event_day, set start_time to null
-                    if parsed_event.get('start_time') and not parsed_event.get('event_day'):
-                        parsed_event['start_time'] = None
-                    # If we have both event_day and start_time, format as timestamp
-                    elif parsed_event.get('start_time') and parsed_event.get('event_day'):
-                        # Convert to proper timestamp format: "2023-05-16T14:30:00"
-                        parsed_event['start_time'] = f"{parsed_event['event_day']}T{parsed_event['start_time']}:00"
+                    # Remove end_time from parsed_event if present
+                    parsed_event.pop('end_time', None)
 
                     # 3d. Upsert to Supabase
                     logging.info(f"Upserting event: {parsed_event}")

@@ -86,7 +86,6 @@ def wait_for_ip(instance_id, poll_interval=5, max_retries=3, retry_delay=5):
     poll_count = 0
     while True:
         poll_count += 1
-        print(f"[ ] Poll #{poll_count}: Checking instance status…")
         for attempt in range(1, max_retries + 1):
             try:
                 r = requests.get("https://cloud.lambdalabs.com/api/v1/instances", headers=headers)
@@ -100,23 +99,20 @@ def wait_for_ip(instance_id, poll_interval=5, max_retries=3, retry_delay=5):
                 else:
                     print("[!] Max retries reached while polling for IP. Exiting.")
                     raise
-        # Print the full response for debugging
-        print("[DEBUG] Full API response:")
-        try:
-            print(json.dumps(r.json(), indent=2))
-        except Exception as e:
-            print(f"[DEBUG] Could not decode JSON response: {e}")
+        # Minimal polling output
         found = False
         for inst in r.json().get("data", []):
-            print(f"[DEBUG] Instance: id={inst.get('id')}, status={inst.get('status')}, ip={inst.get('ip')}")
             if inst.get("id") == instance_id:
-                if inst.get("ip"):
-                    ip = inst["ip"]
-                    print(f"[+] Instance {instance_id} is up at {ip}")
+                status = inst.get("status")
+                ip = inst.get("ip")
+                if status == "running" and ip:
+                    print(f"[✓] Instance is running! IP: {ip}")
                     return ip
+                print(f"[ ] Poll #{poll_count}: status={status}, ip={ip or 'pending'}")
                 found = True
+                break
         if not found:
-            print(f"[ ] Instance {instance_id} not found in API response yet.")
+            print(f"[ ] Poll #{poll_count}: instance not found yet.")
         time.sleep(poll_interval)
 
 def wait_for_ssh(ip, port=22, attempts=30, poll_interval=10):
@@ -175,11 +171,19 @@ if __name__ == "__main__":
     # ── At this point we have instance_id, now wait for its IP ──
     ip = wait_for_ip(instance_id)
 
-    # Wait for SSH to become available
-    if not wait_for_ssh(ip):
-        exit(1)
+    # SSH in and clone the repo first (ensure directory exists)
+    print(f"[ ] Cloning repo on {ip}…")
+    ssh_base = [
+        "ssh",
+        "-i", PRIVATE_SSH_KEY_PATH,
+        "-o", "StrictHostKeyChecking=no",
+        f"ubuntu@{ip}"
+    ]
+    subprocess.run(ssh_base + [
+        "git clone --branch lambda-automation-fix https://github.com/MTAleadgen/TheSauceo3StrategyNew.git || true"
+    ], check=True)
 
-    # Copy .env file to remote instance
+    # Now copy .env file to remote instance
     print(f"[ ] Copying .env file to {ip}…")
     scp_cmd = [
         "scp",
@@ -192,19 +196,9 @@ if __name__ == "__main__":
 
     # ── SSH in, install dependencies, pull repo, and run clean_events.py ──
     print(f"[ ] Installing dependencies and pulling repo on {ip}…")
-    ssh_base = [
-        "ssh",
-        "-i", PRIVATE_SSH_KEY_PATH,
-        "-o", "StrictHostKeyChecking=no",
-        f"ubuntu@{ip}"
-    ]
     # Update and install system deps, python, git, venv
     subprocess.run(ssh_base + [
         "sudo apt-get update && sudo apt-get install -y python3 python3-pip python3-venv git"
-    ], check=True)
-    # Clone or pull repo
-    subprocess.run(ssh_base + [
-        "if [ ! -d TheSauceo3StrategyNew ]; then git clone https://github.com/MTAleadgen/TheSauceo3StrategyNew.git; else cd TheSauceo3StrategyNew && git pull && cd ..; fi"
     ], check=True)
     # Set up venv and install requirements
     subprocess.run(ssh_base + [

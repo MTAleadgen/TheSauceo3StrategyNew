@@ -36,6 +36,8 @@ def get_events(supabase: Client, offset: int, limit: int):
 def upsert_event_clean(supabase: Client, event_clean: dict):
     print("UPSERT PAYLOAD:", event_clean)  # Debug print to show payload
     try:
+        # Remove end_time from event_clean dict if present
+        event_clean.pop('end_time', None)
         response = supabase.table('events_clean').upsert(event_clean, on_conflict='event_id').execute()
         if hasattr(response, 'data') and response.data:
             return True
