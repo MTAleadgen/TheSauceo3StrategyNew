@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+print("DEBUG: LAMBDA_TOKEN =", os.getenv("LAMBDA_TOKEN"))
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
