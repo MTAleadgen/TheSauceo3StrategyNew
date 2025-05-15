@@ -33,7 +33,7 @@ SYSTEM_PROMPT = (
     "1. Rewrite the event description to be concise (≤ 120 words), clear, and conversational. No ALL-CAPS, no unnecessary emojis.\n"
     "2. Decide if the event features a live band (true/false).\n"
     "3. Decide if there is a class or lesson before the main event (true/false).\n"
-    "4. Extract the event price ONLY if it is 'Free' or a number with a $ or other currency symbol in front of it (e.g., '$5', '€10', 'R$20', '£8', or 'Free'). If no such price is found, return null. Do NOT return numbers without a currency symbol.\n"
+    "4. Extract the event price ONLY if it is 'Free' (including synonyms like 'gratis', 'entrada gratuita', 'entrada libre', etc.—normalize all to 'Free'), or a number or range with a $ or other currency symbol in front of it (e.g., '$5', '€10', 'R$20', '£8', '$5-$10', 'R$10–R$20', '€5–10'). If no such price is found, return null. Do NOT return numbers without a currency symbol or ambiguous words.\n"
     "Return your answer as a JSON object with these fields:\n"
     "{\n"
     '  "rewritten_description": "...",\n'
@@ -126,11 +126,17 @@ def enrich_event_with_llm(event: dict) -> dict:
         price = llm_result.get("price")
         if isinstance(price, str):
             price = price.strip()
-            if not (price.lower() == "free" or re.match(r"^(r\$|us?\$|\$|€|£)\s*\d+", price, re.I)):
+            # Normalize synonyms for free
+            if price.lower() in ["free", "gratis", "entrada gratuita", "entrada libre", "gratuito", "libre"]:
+                price = "Free"
+            # Accept currency with number or range
+            elif not re.match(r"^(r\$|us?\$|\$|€|£)\s*\d+([–-]\d+)?", price, re.I):
                 price = None
         elif price is not None:
             price = str(price)
-            if not (price.lower() == "free" or re.match(r"^(r\$|us?\$|\$|€|£)\s*\d+", price, re.I)):
+            if price.lower() in ["free", "gratis", "entrada gratuita", "entrada libre", "gratuito", "libre"]:
+                price = "Free"
+            elif not re.match(r"^(r\$|us?\$|\$|€|£)\s*\d+([–-]\d+)?", price, re.I):
                 price = None
         event_copy["price"] = price
         event_copy["name"] = event.get("name")
