@@ -14,6 +14,7 @@ import re
 from datetime import datetime, date, time
 from typing import Any, Dict, List, Tuple, Optional
 import pytz
+import logging
 
 from dateutil.parser import parse as dt_parse
 
@@ -130,6 +131,7 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not raw:
         return None
 
+    logger = logging.getLogger(__name__)
     ev_day = raw.get("event_day")          # may be str or date
 
     # ---------- description ------------------------------------------------
@@ -141,9 +143,10 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         raw.get("name", ""), description
     )
 
-    # we need at least one style to consider this an eligible record
+    # Allow events with no detected style, but log a warning
     if not styles:
-        return None
+        logger.warning(f"No dance styles detected for event: {raw.get('id') or raw.get('event_id')} - {name}")
+        styles = []
 
     # ---------- times ------------------------------------------------------
     start_ts = _combine_date_time(ev_day, raw.get("start_time"))
