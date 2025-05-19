@@ -29,19 +29,22 @@ else:
 
 
 SYSTEM_PROMPT = (
+    "IMPORTANT: RETURN ONLY THE JSON OBJECT BELOW. DO NOT INCLUDE ANY EXPLANATION, MARKDOWN, OR EXTRA TEXT. IF YOU INCLUDE ANYTHING EXCEPT THE JSON OBJECT, YOU WILL BREAK THE SYSTEM.\n"
     "You are an event data processor. For the event below, do the following:\n"
     "1. Rewrite the event description to be concise (≤ 120 words), clear, and conversational. No ALL-CAPS, no unnecessary emojis.\n"
     "2. Decide if the event features a live band (true/false).\n"
     "3. Decide if there is a class or lesson before the main event (true/false).\n"
     "4. Extract the event price. If the event is free or has no cost to attend (in any language or phrasing), return 'Free'. If there is a price, return it as stated (including currency symbol or word, or as a range). If no price can be found, return null. Do not return ambiguous words or numbers without a currency or context.\n"
-    "5. Extract the event time range from the raw_when field. Normalize to the format '8:00 p.m. to 1:00 a.m.'. If no time is found, return null.\n"
-    "Return your answer as a JSON object with these fields:\n"
+    "5. Extract the event time range from the raw_when field. Process times in both Spanish (MX) and Portuguese (BR). Convert 24-hour format (like 16:00) to 12-hour format (4:00 p.m.). If only a start time exists, return just that time (e.g., '8:00 p.m.'). If a range exists, return it as 'start_time to end_time' (e.g., '8:00 p.m. to 1:00 a.m.'). Handle multi-day events correctly. If no time is found, return your best guess based on the description or use a default like 'TBD'. NEVER return null for time unless absolutely no time information is present.\n"
+    "6. Decide if this event is a dance event or a concert in a dance genre (salsa, bachata, forro, kizomba, zouk, cumbia, ballroom, etc). Return true if yes, false if not.\n"
+    "RETURN ONLY THE JSON OBJECT WITH THESE FIELDS. DO NOT INCLUDE ANY EXPLANATION, MARKDOWN, OR EXTRA TEXT. THE OUTPUT MUST BE VALID JSON AND NOTHING ELSE.\n"
     "{\n"
     '  "rewritten_description": "...",\n'
     '  "live_band": true/false,\n'
     '  "class_before": true/false,\n'
     '  "price": "...", // string or null\n'
-    '  "time": "..." // string or null\n'
+    '  "time": "...", // string or null\n'
+    '  "is_dance_event": true/false\n'
     "}"
 )
 
@@ -103,6 +106,7 @@ def enrich_event_with_llm(event: dict) -> dict:
         event_copy["name"] = event.get("name")
         event_copy["price"] = event.get("price")
         event_copy["time"] = None
+        event_copy["is_dance_event"] = None
         return event_copy
 
     user_message = f"Event title: {event.get('name', '')}\nEvent description: {event.get('description', '')}\nEvent raw_when: {event.get('raw_when', '')}"
@@ -120,7 +124,13 @@ def enrich_event_with_llm(event: dict) -> dict:
     data = r.json()
     content = data["choices"][0]["message"]["content"].strip()
     try:
-        llm_result = json.loads(content)
+        # Extract the first JSON object from the LLM output using regex
+        match = re.search(r"\{[\s\S]*?\}", content)
+        if match:
+            json_str = match.group(0)
+        else:
+            raise ValueError(f"No JSON object found in LLM output: {content}")
+        llm_result = json.loads(json_str)
         event_copy = event.copy()
         event_copy["description"] = llm_result.get("rewritten_description")
         event_copy["live_band"] = llm_result.get("live_band")
@@ -134,7 +144,7 @@ def enrich_event_with_llm(event: dict) -> dict:
                 price = "Free"
             else:
                 # Accept any price with a currency symbol or word, or a range
-                currency_pattern = r"(r\$|us?\$|\$|€|£|dollars?|usd|euros?|eur|reais|real|brl|pounds?|gbp)"
+                currency_pattern = r"(r\\$|us?\\$|\\$|€|£|dollars?|usd|euros?|eur|reais|real|brl|pounds?|gbp)"
                 if not re.search(currency_pattern, price, re.I):
                     price = None
         elif price is not None:
@@ -142,12 +152,30 @@ def enrich_event_with_llm(event: dict) -> dict:
             if price.lower() == "free":
                 price = "Free"
             else:
-                currency_pattern = r"(r\$|us?\$|\$|€|£|dollars?|usd|euros?|eur|reais|real|brl|pounds?|gbp)"
+                currency_pattern = r"(r\\$|us?\\$|\\$|€|£|dollars?|usd|euros?|eur|reais|real|brl|pounds?|gbp)"
                 if not re.search(currency_pattern, price, re.I):
                     price = None
         event_copy["price"] = price
-        event_copy["time"] = llm_result.get("time")
+        # Handle time: if missing or null, try fallback extraction
+        time_val = llm_result.get("time")
+        if not time_val or time_val.lower() in ("null", "none", "tbd", ""):
+            # Try to extract time from description or raw_when using regex
+            desc = event.get("description", "")
+            raw_when = event.get("raw_when", "")
+            time_regex = r"(\d{1,2}:\d{2}\s*[ap]\.?m\.?)(?:\s*(?:to|\-|–)\s*(\d{1,2}:\d{2}\s*[ap]\.?m\.?))?"
+            match = re.search(time_regex, desc, re.IGNORECASE) or re.search(time_regex, raw_when, re.IGNORECASE)
+            if match:
+                if match.group(2):
+                    time_val = f"{match.group(1)} to {match.group(2)}"
+                else:
+                    time_val = match.group(1)
+            else:
+                time_val = None
+            if not time_val:
+                logger.warning(f"LLM and fallback failed to extract time. LLM output: {content}, description: {desc}, raw_when: {raw_when}")
+        event_copy["time"] = time_val
         event_copy["name"] = event.get("name")
+        event_copy["is_dance_event"] = llm_result.get("is_dance_event")
         return event_copy
     except Exception as e:
         logger.error(f"Failed to parse LLM JSON: {e}, content: {content}")
@@ -158,6 +186,7 @@ def enrich_event_with_llm(event: dict) -> dict:
         event_copy["price"] = event.get("price")
         event_copy["time"] = None
         event_copy["name"] = event.get("name")
+        event_copy["is_dance_event"] = None
         return event_copy
 
 # Example Usage (Optional - requires LAMBDA_QWEN_URL and LAMBDA_TOKEN in env)

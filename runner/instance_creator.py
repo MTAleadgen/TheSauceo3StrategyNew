@@ -139,6 +139,18 @@ def run_in_wsl():
     wsl_command = " && ".join(wsl_commands)
     subprocess.run(["wsl", "bash", "-c", wsl_command], check=True)
 
+def terminate_instance(instance_id):
+    print(f"[ ] Terminating instance {instance_id}…")
+    payload = {"instance_ids": [instance_id]}
+    try:
+        resp = requests.post(f"{LAMBDA_API_URL}/terminate", headers=headers, json=payload)
+        if resp.status_code == 200:
+            print(f"[✓] Instance {instance_id} terminated successfully.")
+        else:
+            print(f"[!] Failed to terminate instance {instance_id}: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"[!] Exception while terminating instance {instance_id}: {e}")
+
 if __name__ == "__main__":
     if platform.system() == "Windows":
         run_in_wsl()
@@ -208,4 +220,7 @@ if __name__ == "__main__":
     subprocess.run(ssh_base + [
         "cd TheSauceo3StrategyNew && source venv/bin/activate && python -m runner.clean_events"
     ], check=True)
-    print(f"[✓] Remote instance {ip} is set up and clean_events.py has run.") 
+    print(f"[✓] Remote instance {ip} is set up and clean_events.py has run.")
+
+    # Terminate the instance after processing is complete
+    terminate_instance(instance_id) 

@@ -80,7 +80,7 @@ def _clean_date_string_for_parsing(date_str: str) -> str:
 
     return s
 
-def parse_event_result(event_data: Dict, max_days_forward: int = 365, city_info: Dict = None) -> Optional[Dict]:
+def parse_event_result(event_data: Dict, city_info: Dict = None) -> Optional[Dict]:
     """Parses a raw event dictionary from SerpAPI into our standardized format.
     Returns None if the event should be excluded."""
 
@@ -186,22 +186,10 @@ def parse_event_result(event_data: Dict, max_days_forward: int = 365, city_info:
         "name": event_data.get('title'),
         "description": event_data.get('description', ''),
         "event_day": event_day,  # Will be None if parsing failed
-        "raw_start_date": raw_start_date,
         "raw_when": raw_when, 
         "venue": event_data.get('venue', {}).get('name'),
         "address": event_data.get('address', []),
     }
-
-    # --- Enforce max_days_forward filter ---
-    if event_day:
-        try:
-            event_date = datetime.strptime(event_day, "%Y-%m-%d").date()
-            today = datetime.now(timezone.utc).date()
-            if (event_date - today).days > max_days_forward:
-                logger.info(f"Skipping event {event_data.get('title')} on {event_day}: beyond {max_days_forward} days forward.")
-                return None
-        except Exception as e:
-            logger.warning(f"Error checking days forward for event '{event_data.get('title')}': {e}")
 
     # --- Extract Venue/Location ---
     venue_data = event_data.get("venue", {})
@@ -240,6 +228,10 @@ def parse_event_result(event_data: Dict, max_days_forward: int = 365, city_info:
         "lat": lat,
         "lng": lng,
     })
+    
+    # Remove ticket_info_raw from event_record if present
+    if 'ticket_info_raw' in event_record:
+        del event_record['ticket_info_raw']
     
     logger.debug(f"Successfully parsed event: {source_id} - {event_data.get('title')[:50]}...")
     return event_record

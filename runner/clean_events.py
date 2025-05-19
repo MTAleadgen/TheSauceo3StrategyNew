@@ -21,11 +21,9 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     logger.error("SUPABASE_URL and SUPABASE_KEY must be set in the environment or .env file.")
     sys.exit(1)
 
-BATCH_SIZE = 100
-
-def get_events(supabase: Client, offset: int, limit: int):
+def get_all_events(supabase: Client):
     try:
-        response = supabase.table('events').select('*').range(offset, offset + limit - 1).execute()
+        response = supabase.table('events').select('*').range(0, 9999).execute()
         if hasattr(response, 'data'):
             return response.data
         return []
@@ -50,38 +48,47 @@ def upsert_event_clean(supabase: Client, event_clean: dict):
 
 def main():
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    offset = 0
+    events = get_all_events(supabase)
+    logger.info(f"Fetched {len(events)} events from Supabase")
+    logger.info(f"Event IDs: {[e.get('id') or e.get('source_id') for e in events]}")
     total_processed = 0
     total_upserted = 0
     total_failed = 0
-    while True:
-        events = get_events(supabase, offset, BATCH_SIZE)
-        if not events:
-            break
-        logger.info(f"Processing batch: {offset} - {offset + len(events) - 1}")
-        for event in events:
-            try:
-                # Step 1: Enrich event with LLM (description, live_band, class_before)
-                if event.get('description'):
-                    event = enrich_event_with_llm(event)
-                # Step 2: Clean/transform event
-                cleaned = transform_event_data(event)
-                if not cleaned:
-                    logger.warning(f"Event skipped by transformer: {event.get('id') or event.get('source_id')}")
-                    total_failed += 1
-                    continue
-                # Step 3: Upsert to events_clean
-                if upsert_event_clean(supabase, cleaned):
-                    total_upserted += 1
-                else:
-                    total_failed += 1
-                total_processed += 1
-            except Exception as e:
-                logger.error(f"Failed to process event {event.get('id') or event.get('source_id')}: {e}")
+    logger.info(f"Processing {len(events)} events")
+    for event in events:
+        try:
+            event_id = event.get('id') or event.get('source_id')
+            logger.info(f"\n--- Processing Event ---\nID: {event_id}\nName: {event.get('name')}\nDescription: {event.get('description')}\nRaw_when: {event.get('raw_when')}\nTime: {event.get('time')}")
+            # Step 1: Enrich event with LLM (description, live_band, class_before, is_dance_event)
+            if event.get('description'):
+                event_llm = enrich_event_with_llm(event)
+                logger.info(f"LLM Output for Event {event_id}: {event_llm}")
+                event = event_llm
+            # Step 2: Clean/transform event
+            cleaned = transform_event_data(event)
+            logger.info(f"Cleaned Event for {event_id}: {cleaned}")
+            if not cleaned:
+                logger.warning(f"Event skipped by transformer: {event_id} (transformer returned None)")
                 total_failed += 1
-        if len(events) < BATCH_SIZE:
-            break
-        offset += BATCH_SIZE
+                continue
+            # Step 2.5: Filter by is_dance_event
+            if not cleaned.get('is_dance_event'):
+                logger.info(f"Skipping non-dance event: {event_id} - {event.get('name')}")
+                total_failed += 1
+                continue
+            # Log if time is missing
+            if not cleaned.get('time'):
+                logger.warning(f"Event missing time: {event_id} - {event.get('name')}. LLM output: {event}")
+            # Step 3: Upsert to events_clean
+            if upsert_event_clean(supabase, cleaned):
+                total_upserted += 1
+            else:
+                logger.warning(f"Upsert failed for event: {event_id}")
+                total_failed += 1
+            total_processed += 1
+        except Exception as e:
+            logger.error(f"Failed to process event {event.get('id') or event.get('source_id')}: {e}")
+            total_failed += 1
     logger.info(f"Done. Processed: {total_processed}, Upserted: {total_upserted}, Failed: {total_failed}")
 
 if __name__ == "__main__":

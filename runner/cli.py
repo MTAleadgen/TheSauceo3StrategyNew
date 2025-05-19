@@ -12,8 +12,9 @@ import json
 import math # For pagination
 import backoff # For retries
 from requests.exceptions import RequestException # Specific exception for backoff
-from pipelines.serpapi.events.qwen_cleaner import rewrite_description
 from datetime import datetime
+import string
+from unidecode import unidecode
 
 # Dynamically adjust path to import pipeline modules
 # Assuming runner/cli.py is run from the project root (e.g., python -m runner.cli)
@@ -173,6 +174,12 @@ def delete_past_events(supabase: Client):
         except Exception as e:
             logger.error(f"Error deleting past events from {table}: {e}")
 
+def canon(txt):
+    if not txt:
+        return None
+    txt = unidecode(txt.lower()).translate(str.maketrans('', '', string.punctuation))
+    return " ".join(txt.split())
+
 # --- Main Execution --- 
 
 def main():
@@ -232,8 +239,8 @@ def main():
 
     # --- Pipeline Execution ---
     total_cities = len(cities)
-    batch_size = args.batch_size
-    num_batches = (total_cities + batch_size - 1) // batch_size
+    # batch_size = args.batch_size # Batching not fully implemented, process one city at a time
+    # num_batches = (total_cities + batch_size - 1) // batch_size
 
     summary = {
         "total_cities_processed": 0,
@@ -248,147 +255,131 @@ def main():
         "database_errors": 0,
         "runtime_seconds": 0,
     }
+    
+    # Delete past events before starting new run
+    delete_past_events(supabase)
 
-    for i in range(num_batches):
-        start_index = i * batch_size
-        end_index = min((i + 1) * batch_size, total_cities)
-        batch_cities = cities[start_index:end_index]
+    # Process each city
+    for city_index, city_info in enumerate(cities):
+        logging.info(f"Processing city {city_index + 1}/{total_cities}: {city_info['name']}")
+        summary["total_cities_processed"] += 1
         
-        logging.info(f"Processing batch {i + 1}/{num_batches} (Cities {start_index + 1}-{end_index})...")
+        current_page = 0
+        events_fetched_for_city = 0
+        max_pages = math.ceil(args.max_events / SERPAPI_RESULTS_PER_PAGE) if args.max_events > 0 else float('inf')
 
-        for city_row in batch_cities:
-            summary["total_cities_processed"] += 1
-            logging.info(f"Processing city: {city_row.get('name')}, {city_row.get('country_code')}")
+        while events_fetched_for_city < args.max_events and current_page < max_pages:
+            # Calculate 'start' parameter for pagination
+            # SerpAPI's 'start' is 0-indexed for the first page, then 10, 20, etc.
+            start_index = current_page * SERPAPI_RESULTS_PER_PAGE
             
-            all_city_events_raw = []
-            current_page = 0
-            MAX_PAGES_TO_FETCH = 2 # Max 2 pages * 10 results/page = 20 events max
+            params = build_params(city_info)
+            params["start"] = start_index
+            params["num"] = SERPAPI_RESULTS_PER_PAGE
+            logging.debug(f"SerpAPI params for {city_info['name']}, page {current_page + 1}: {params}")
+            
+            result_json = call_serpapi_with_retry(params)
+            summary["total_serpapi_requests"] += 1
 
-            # 1. Build initial Params
-            try:
-                serpapi_params = build_params(city_row)
-            except ValueError as e:
-                logging.error(f"Skipping city {city_row.get('name')} due to param build error: {e}")
-                continue # Skip to next city
-            except Exception as e:
-                 logging.error(f"Unexpected error building params for city {city_row.get('name')}: {e}")
-                 continue
+            if not result_json:
+                summary["serpapi_api_errors"] += 1
+                logging.error(f"No result from SerpAPI for {city_info['name']}, page {current_page + 1}. Skipping to next city or page.")
+                break # Break from while loop (pagination for this city)
 
-            # Fetch pages (up to MAX_PAGES_TO_FETCH)
-            while current_page < MAX_PAGES_TO_FETCH:
-                # For subsequent pages, update start param
-                if current_page > 0:
-                    serpapi_params['start'] = current_page * SERPAPI_RESULTS_PER_PAGE
-                    # Add a short delay between page requests to avoid connection issues
-                    time.sleep(2)
+            # Increment credits used if API call was successful and returned results
+            # Assuming 1 credit per successful API call with results
+            if "events_results" in result_json and result_json["events_results"]:
+                 summary["total_serpapi_credits_used"] += 1
+
+
+            events_on_page = result_json.get("events_results", [])
+            if not events_on_page:
+                logging.info(f"No more events found for {city_info['name']} on page {current_page + 1}.")
+                break # No more events for this city
+
+            logging.info(f"Found {len(events_on_page)} events on page {current_page + 1} for {city_info['name']}.")
+
+            for event_item in events_on_page:
+                if events_fetched_for_city >= args.max_events:
+                    logging.info(f"Reached max events ({args.max_events}) for city {city_info['name']}.")
+                    break # Break from inner for loop
+
+                parsed_event_data = parse_event_result(event_item, city_info=city_info)
+                if not parsed_event_data:
+                    logging.warning(f"Could not parse event item: {event_item.get('title', 'Unknown Event')}")
+                    continue
+
+                # --- NEW: Extract venue name from SerpAPI result ---
+                venue_name_from_serp = event_item.get("venue", {}).get("name")
+                parsed_event_data["venue"] = venue_name_from_serp # Add/overwrite venue
+
+                # --- NEW: Ensure address is a string ---
+                serp_address_list = event_item.get("address", [])
+                if isinstance(serp_address_list, list):
+                    parsed_event_data["address"] = ", ".join(serp_address_list)
+                elif isinstance(serp_address_list, str): # Should not happen based on example, but good practice
+                     parsed_event_data["address"] = serp_address_list
+                else:
+                    parsed_event_data["address"] = None # Or some default if address is critical
+
+                # Add raw_when for potential LLM processing later (if not already in parse_event_result)
+                if "raw_when" not in parsed_event_data and "date" in event_item and "when" in event_item["date"]:
+                    parsed_event_data["raw_when"] = event_item["date"]["when"]
                 
-                # 2. Call SerpAPI
-                try:
-                    serpapi_results = call_serpapi_with_retry(serpapi_params)
-                    if not serpapi_results:
-                        logging.warning(f"No results returned for page {current_page+1}")
-                        break
-                        
-                    summary["total_serpapi_requests"] += 1
-                    
-                    # 2a. Extract events list
-                    events_results = serpapi_results.get("events_results", [])
-                    if events_results:
-                        all_city_events_raw.extend(events_results)
-                        logging.info(f"Page {current_page+1}: Retrieved {len(events_results)} events for {city_row.get('name')}")
-                    else:
-                        logging.info(f"No events found on page {current_page+1} for {city_row.get('name')}")
-                        break  # No events on this page, so stop requesting more
-                    
-                    # 2b. Check if there are still more events to fetch
-                    has_more_events = len(events_results) >= SERPAPI_RESULTS_PER_PAGE
-                    
-                    # Advance to next page if there are potentially more results
-                    current_page += 1
-                    
-                    # Break if we got fewer results than expected (no more pages)
-                    if not has_more_events:
-                        logging.info(f"No more events for {city_row.get('name')} after page {current_page}")
-                        break
-                        
-                except Exception as e:
-                    logging.error(f"Error fetching events for {city_row.get('name')}: {e}")
-                    summary["serpapi_api_errors"] += 1  # Increment error counter
-                    break  # Skip to next city on error
+                # Add ticket_info_raw (if not already in parse_event_result)
+                if "ticket_info_raw" not in parsed_event_data and "ticket_info" in event_item:
+                     parsed_event_data["ticket_info_raw"] = json.dumps(event_item["ticket_info"])
 
-            # Process all events for this city
-            summary["events_found"] += len(all_city_events_raw)
-            logging.info(f"Found {len(all_city_events_raw)} total potential events across all pages for {city_row.get('name')}")
+                # Canonicalize venue, address, and name before upsert
+                if 'venue' in parsed_event_data:
+                    parsed_event_data['venue'] = canon(parsed_event_data['venue'])
+                if 'address' in parsed_event_data:
+                    parsed_event_data['address'] = canon(parsed_event_data['address'])
+                if 'name' in parsed_event_data:
+                    parsed_event_data['name'] = canon(parsed_event_data['name'])
 
-            for event_idx, event_raw in enumerate(all_city_events_raw, 1):
-                parsed_event = None
-                try:
-                    # 3a. Parse
-                    parsed_event = parse_event_result(event_raw, args.days_forward, city_row)
-                    
-                    # If parsing failed or event was filtered out, skip to next event_raw
-                    if parsed_event is None:
-                        # source_id might not exist if parsing failed very early
-                        event_identifier = event_raw.get("link") or event_raw.get("title", "UNKNOWN_EVENT")
-                        logging.warning(f"Skipping event processing for {event_identifier} as parsing returned None.")
-                        continue
+                # Remove any fields not in the events table schema before upsert
+                allowed_fields = {
+                    'source_id', 'source_url', 'source_platform', 'retrieved_at', 'name', 'description',
+                    'venue', 'address', 'city', 'country', 'lat', 'lng', 'event_day', 'raw_when'
+                }
+                parsed_event_data = {k: v for k, v in parsed_event_data.items() if k in allowed_fields}
 
-                    if not parsed_event.get('source_id'): # This check might be redundant if None is handled above
-                        logging.warning("Parsed event missing source_id, skipping. Event data: " + str(parsed_event))
-                        continue
+                logging.debug(f"Attempting to upsert event: {parsed_event_data.get('name')}")
+                if upsert_event(supabase, parsed_event_data):
+                    summary["events_upserted_success"] += 1
+                else:
+                    summary["events_upserted_failure"] += 1
+                    summary["database_errors"] += 1 
+                
+                events_fetched_for_city += 1
+                summary["events_found"] += 1
+            
+            if events_fetched_for_city >= args.max_events:
+                break # Break from while loop (pagination)
 
-                    # 3b. Enrich (if needed)
-                    enrichment_needed = not parsed_event.get('address') or parsed_event.get('lat') is None
-                    if enrichment_needed:
-                        summary["enrichment_attempts"] += 1
-                        parsed_event = enrich_with_places(parsed_event)
-                    
-                    # 3c. Clean Description
-                    # No rewriting or extra fields at this stage; just keep the raw description
-                    # Remove fields not needed at this stage
-                    for field in ["live_band", "class_before", "rewritten_description", "dance_styles"]:
-                        if field in parsed_event:
-                            del parsed_event[field]
+            # Check if there are more pages
+            pagination_info = result_json.get("serpapi_pagination", result_json.get("pagination")) # check both keys
+            if pagination_info and "next" in pagination_info:
+                current_page += 1
+                logging.info(f"Advancing to next page ({current_page + 1}) for {city_info['name']}.")
+                # Small delay before next paginated request for the same city
+                time.sleep(1) 
+            else:
+                logging.info(f"No more pages indicated for {city_info['name']}.")
+                break # No more pages
 
-                    # Handle missing values that could cause DB errors
-                    if parsed_event.get('venue') is None:
-                        parsed_event['venue'] = "__VENUE_UNKNOWN__"  # Must have a venue for conflict checks
-                    
-                    # Remove end_time from parsed_event if present
-                    parsed_event.pop('end_time', None)
+        logging.info(f"Finished processing city: {city_info['name']}. Fetched {events_fetched_for_city} events.")
+        # Optional: Longer delay between different cities if needed
+        # time.sleep(2) 
 
-                    # 3d. Upsert to Supabase
-                    logging.info(f"Upserting event: {parsed_event}")
-                    if upsert_event(supabase, parsed_event):
-                        summary["events_upserted_success"] += 1
-                    else:
-                        summary["events_upserted_failure"] += 1
-                        summary["database_errors"] += 1 # Increment general DB error counter
-
-                except Exception as e:
-                    # Log the specific event_raw that caused the error if possible
-                    failed_event_id = event_raw.get("link") or event_raw.get("title", "UNKNOWN_RAW_EVENT")
-                    logging.error(f"Failed processing event item {failed_event_id} for city {city_row.get('name')}: {e}")
-                    # Log the parsed_event if it exists and parsing didn't fail catastrophically
-                    if parsed_event:
-                        logging.error(f"State of parsed_event at time of failure: {parsed_event}")
-                    summary["events_upserted_failure"] += 1 # Count as failure if processing fails
-
-        logging.info(f"Finished batch {i + 1}/{num_batches}. Sleeping briefly...")
-        time.sleep(2) # Small delay between batches
-
-    # --- Final Summary --- 
-    end_time = time.time()
-    summary["runtime_seconds"] = round(end_time - start_time, 2)
-
-    # Email Stub / Output
-    if os.getenv("SMTP_HOST"):
-        logging.info("SMTP_HOST is set. Attempting to send email summary.")
-        send_email(summary)        # implement later
-    else:
-        logging.info("SMTP_HOST not set. Logging run summary as JSON.")
-        # Use logging instead of print for consistency
-        logging.info("Run summary:\n%s", json.dumps(summary, indent=2, default=str))
+    # --- Final Summary & Cleanup ---
+    summary["runtime_seconds"] = round(time.time() - start_time, 2)
+    logging.info("Pipeline run finished.")
+    logging.info(f"Summary:\n{json.dumps(summary, indent=2, default=str)}")
+    
+    # Placeholder for sending email with summary
+    # send_email(summary)
 
 if __name__ == "__main__":
     main()
