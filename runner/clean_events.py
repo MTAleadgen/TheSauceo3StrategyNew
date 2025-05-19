@@ -72,7 +72,8 @@ def main():
                 total_failed += 1
                 continue
             # Step 2.5: Filter by is_dance_event
-            if not cleaned.get('is_dance_event'):
+            logger.info(f"Checking is_dance_event for {event_id}: {cleaned.get('is_dance_event')}")
+            if cleaned.get('is_dance_event') is False:
                 logger.info(f"Skipping non-dance event: {event_id} - {event.get('name')}")
                 total_failed += 1
                 continue
@@ -80,6 +81,7 @@ def main():
             if not cleaned.get('time'):
                 logger.warning(f"Event missing time: {event_id} - {event.get('name')}. LLM output: {event}")
             # Step 3: Upsert to events_clean
+            logger.info(f"Upserting event: {event_id} - {cleaned.get('name')}")
             if upsert_event_clean(supabase, cleaned):
                 total_upserted += 1
             else:
