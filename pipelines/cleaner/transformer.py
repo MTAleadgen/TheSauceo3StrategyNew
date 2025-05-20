@@ -183,6 +183,19 @@ def to_12_hour(hour, minute):
     return f'{hour12}:{minute:02d} {ampm}'
 
 
+def fix_time_format(time_str):
+    """Fixes time strings like '400' to '4:00', removes double periods, and trims whitespace."""
+    if not time_str:
+        return time_str
+    # Insert colon if missing (e.g., 400 -> 4:00, 930 -> 9:30)
+    time_str = re.sub(r'\b(\d{1,2})(\d{2})\b', r'\1:\2', time_str)
+    # Remove double periods
+    time_str = re.sub(r'\.\.', '.', time_str)
+    # Remove extra spaces
+    time_str = re.sub(r'\s+', ' ', time_str)
+    return time_str.strip()
+
+
 def normalize_time_am_pm(time_str: str) -> Optional[str]:
     if not time_str:
         return None
@@ -202,7 +215,7 @@ def normalize_time_am_pm(time_str: str) -> Optional[str]:
             t1 = to_12_hour(h1, m1) if not ampm1 else f"{int(h1)%12 or 12}:{m1} {ampm1.strip('.').lower()}."
             t2 = to_12_hour(h2, m2) if not ampm2 else f"{int(h2)%12 or 12}:{m2} {ampm2.strip('.').lower()}."
             result = f"{t1} to {t2}"
-            return clean_meridiem(result)
+            return fix_time_format(clean_meridiem(result))
     # If single time
     single_match = re.match(r'(\d{1,2})(?::(\d{2}))?\s*([ap]\.m\.|[ap]m)?', time_str, re.IGNORECASE)
     if single_match:
@@ -212,17 +225,17 @@ def normalize_time_am_pm(time_str: str) -> Optional[str]:
             t = f"{int(h)%12 or 12}:{m} {ampm.strip('.').lower()}."
         else:
             t = to_12_hour(h, m)
-        return clean_meridiem(t)
+        return fix_time_format(clean_meridiem(t))
     # If only a number (e.g., '22:00' or '23'), convert to am/pm
     just_number = re.match(r'^(\d{1,2})(:00)?$', time_str.strip())
     if just_number:
         t = just_number.group(1)
         try:
-            return clean_meridiem(to_12_hour(t, '00'))
+            return fix_time_format(clean_meridiem(to_12_hour(t, '00')))
         except Exception:
             return time_str
     # If nothing matches, return as is
-    return clean_meridiem(time_str.strip())
+    return fix_time_format(clean_meridiem(time_str.strip()))
 
 
 # ---------------------------------------------------------------------
@@ -262,6 +275,9 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     time_str = normalize_time_am_pm(time_str) if time_str else None
     if not time_str:
         logger.warning(f"Event missing or ambiguous time after normalization. raw_when: {raw.get('raw_when')}, description: {description}, name: {name}")
+    else:
+        # Log the final normalized time for debugging
+        logger.info(f"Final normalized time: {time_str}")
 
     # ---------- flags ------------------------------------------------------
     live_band    = raw.get("live_band")
