@@ -29,14 +29,15 @@ _CURRENCY_RE   = re.compile(r"(r\$|us?\$|\$|€|£)", re.I)
 _LIVE_BAND_RE  = re.compile(r"\b(banda|band|live\s+band|grupo)\b", re.I)
 _CLASS_RE      = re.compile(r"\b(aula|class|work\s*shop|lesson|curso)\b", re.I)
 
-_STYLE_KEYWORDS = {
-    "samba":   ("samba",),
-    "forro":   ("forró", "forro"),
-    "bachata": ("bachata",),
-    "kizomba": ("kizomba",),
-    "salsa":   ("salsa",),
-    "zouk":    ("zouk",),
-    "lambada": ("lambada",),
+DANCE_STYLE_KEYWORDS = {
+    "salsa": [r"salsa"],
+    "bachata": [r"bachata"],
+    "kizomba": [r"kizomba", r"\bkiz\b"],
+    "zouk": [r"zouk"],
+    "forro": [r"forró", r"forro"],
+    "samba": [r"samba"],
+    "rumba": [r"rumba"],
+    "line dancing": [r"line dance", r"line dancing", r"line-dancing"]
 }
 
 
@@ -61,16 +62,15 @@ def _extract_price(text: str | None) -> Tuple[Optional[int], Optional[int]]:
     return int(min(candidates)), int(max(candidates))
 
 
-def _extract_styles(*chunks: str) -> List[str]:
-    """Return list of dance styles detected in *chunks*."""
-    haystack = " ".join(filter(None, chunks)).lower()
-    found: List[str] = []
-
-    for style, variants in _STYLE_KEYWORDS.items():
-        if any(v in haystack for v in variants):
-            found.append(style)
-
-    return found
+def extract_dance_styles(text: str) -> list:
+    styles = []
+    text_lower = text.lower()
+    for style, keywords in DANCE_STYLE_KEYWORDS.items():
+        for kw in keywords:
+            if re.search(kw, text_lower):
+                styles.append(style)
+                break
+    return styles
 
 
 def _combine_date_time(ev_day: Any, ts: Any) -> Optional[datetime]:
@@ -137,16 +137,10 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # ---------- description ------------------------------------------------
     description = raw.get("description", "").strip()
     name = raw.get("name", "")
-
-    # ---------- dance styles ----------------------------------------------
-    styles = raw.get("dance_styles") or _extract_styles(
-        raw.get("name", ""), description
-    )
-
-    # Allow events with no detected style, but log a warning
-    if not styles:
-        logger.warning(f"No dance styles detected for event: {raw.get('id') or raw.get('event_id')} - {name}")
-        styles = []
+    # Log the text being checked for dance styles
+    logger.info(f"Checking dance styles in text: {name} | {description}")
+    styles = extract_dance_styles(f"{name} {description}")
+    logger.info(f"Detected styles: {styles}")
 
     # ---------- times ------------------------------------------------------
     start_ts = _combine_date_time(ev_day, raw.get("start_time"))
@@ -180,5 +174,8 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "source_url":       raw.get("source_url"),
         "time":             time_str,
     }
+
+    if not styles:
+        logger.warning(f"No dance styles detected for event: {raw.get('id') or raw.get('event_id')} - {name}")
 
     return cleaned 
