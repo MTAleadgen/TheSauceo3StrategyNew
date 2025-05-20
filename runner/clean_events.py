@@ -1,6 +1,8 @@
 import os
 import sys
 import logging
+import json
+import time
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from pipelines.serpapi.events.qwen_cleaner import enrich_event_with_llm
@@ -39,20 +41,40 @@ def get_all_events(supabase: Client):
         logger.error(f"Error fetching events from Supabase: {e}")
         return []
 
-def upsert_event_clean(supabase: Client, event_clean: dict):
-    print("UPSERT PAYLOAD:", event_clean)  # Debug print to show payload
+def validate_event_data(event):
+    # Example validation: ensure required fields exist and are of correct type
+    required_fields = ['event_id', 'name', 'event_day']
+    for field in required_fields:
+        if field not in event or event[field] is None:
+            return False, f"Missing required field: {field}"
+    # Add more validation as needed
+    return True, None
+
+def upsert_event_clean_with_retry(supabase: Client, event_clean: dict, max_retries=3, delay=2):
+    for attempt in range(1, max_retries + 1):
+        try:
+            event_clean.pop('end_time', None)
+            response = supabase.table('events_clean').upsert(event_clean, on_conflict='event_id').execute()
+            if hasattr(response, 'data') and response.data:
+                return True, None
+            else:
+                error_msg = f"Upsert to events_clean failed: {getattr(response, 'error', 'No error details')}"
+                if attempt == max_retries:
+                    return False, error_msg
+                time.sleep(delay)
+        except Exception as e:
+            if attempt == max_retries:
+                return False, f"Exception during upsert: {e}"
+            time.sleep(delay)
+    return False, "Unknown error after retries"
+
+def save_failed_event(event, error):
     try:
-        # Remove end_time from event_clean dict if present
-        event_clean.pop('end_time', None)
-        response = supabase.table('events_clean').upsert(event_clean, on_conflict='event_id').execute()
-        if hasattr(response, 'data') and response.data:
-            return True
-        else:
-            logger.error(f"Upsert to events_clean failed: {getattr(response, 'error', 'No error details')}")
-            return False
+        os.makedirs('logs', exist_ok=True)
+        with open('logs/failed_events.jsonl', 'a', encoding='utf-8') as f:
+            f.write(json.dumps({'event': event, 'error': error}, ensure_ascii=False) + '\n')
     except Exception as e:
-        logger.error(f"Error during upsert to events_clean: {e}")
-        return False
+        logger.error(f"Failed to save failed event: {e}")
 
 def main():
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -86,19 +108,29 @@ def main():
                 filtered_events.append({'id': event_id, 'name': event.get('name')})
                 total_failed += 1
                 continue
+            # Step 2.6: Validate data before upsert
+            is_valid, validation_error = validate_event_data(cleaned)
+            if not is_valid:
+                logger.error(f"Validation failed for event: {event_id}. Error: {validation_error}. Data: {cleaned}")
+                save_failed_event(cleaned, validation_error)
+                total_failed += 1
+                continue
             # Log if time is missing
             if not cleaned.get('time'):
                 logger.warning(f"Event missing time: {event_id} - {event.get('name')}. LLM output: {event}")
-            # Step 3: Upsert to events_clean
+            # Step 3: Upsert to events_clean with retry
             logger.info(f"Upserting event: {event_id} - {cleaned.get('name')}")
-            if upsert_event_clean(supabase, cleaned):
+            success, upsert_error = upsert_event_clean_with_retry(supabase, cleaned)
+            if success:
                 total_upserted += 1
             else:
-                logger.warning(f"Upsert failed for event: {event_id}")
+                logger.warning(f"Upsert failed for event: {event_id}. Error: {upsert_error}. Data: {cleaned}")
+                save_failed_event(cleaned, upsert_error)
                 total_failed += 1
             total_processed += 1
         except Exception as e:
-            logger.error(f"Failed to process event {event.get('id') or event.get('source_id')}: {e}")
+            logger.error(f"Failed to process event {event.get('id') or event.get('source_id')}: {e}. Data: {event}")
+            save_failed_event(event, str(e))
             total_failed += 1
     # Log a summary of filtered (non-dance) events
     if filtered_events:
