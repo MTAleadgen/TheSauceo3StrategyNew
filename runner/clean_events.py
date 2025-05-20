@@ -139,6 +139,8 @@ def main():
             logger.info(f"Filtered out: ID={fe['id']}, Name={fe['name']}")
         logger.info("==== End of Filtered Events Report ====")
     logger.info(f"Done. Processed: {total_processed}, Upserted: {total_upserted}, Failed: {total_failed}")
+    logger.info("Finalizing and flushing logs to disk...")
+    logging.shutdown()
 
 if __name__ == "__main__":
     main() 

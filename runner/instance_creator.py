@@ -227,8 +227,12 @@ if __name__ == "__main__":
     ], check=True)
     print(f"[✓] Remote instance {ip} is set up and clean_events.py has run.")
 
+    # Wait to ensure logs are flushed on the GPU
+    print("[LOG] Waiting 2 seconds to ensure logs are flushed on the GPU...")
+    time.sleep(2)
+
     # Download logs from remote instance before termination
-    print(f"[ ] Downloading logs from {ip}…")
+    print(f"[LOG] Downloading logs from {ip} to local machine…")
     scp_log_cmd = [
         "scp",
         "-i", PRIVATE_SSH_KEY_PATH,
@@ -237,6 +241,7 @@ if __name__ == "__main__":
         "./logs/clean_events.log"
     ]
     subprocess.run(scp_log_cmd, check=True)
+    print(f"[LOG] Log file download complete. Check ./logs/clean_events.log on your local machine.")
 
     # Terminate the instance after processing is complete
     terminate_instance(instance_id) 
