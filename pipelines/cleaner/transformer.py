@@ -154,6 +154,64 @@ def extract_time_from_raw_when(raw_when: str) -> Optional[str]:
     return None
 
 
+def normalize_time_am_pm(time_str: str) -> Optional[str]:
+    if not time_str:
+        return None
+    # Remove extraneous date text (e.g., 'Thursday, June 19, 1:00 p.m. to Sunday, June 22, 5:00 p.m.')
+    # Keep only the time range or single time
+    # Try to extract the last two time-like strings (for ranges)
+    matches = re.findall(r'(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})', time_str)
+    ampm_matches = re.findall(r'(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})', time_str)
+    # If range
+    if 'to' in time_str or '–' in time_str or '-' in time_str:
+        # Try to extract two times
+        range_match = re.search(r'(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})\s*(?:to|–|-)\s*(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})', time_str, re.IGNORECASE)
+        if range_match:
+            t1, t2 = range_match.group(1), range_match.group(2)
+            t1 = t1.replace('h', ':').replace('.', ':').replace(',', ':').strip()
+            t2 = t2.replace('h', ':').replace('.', ':').replace(',', ':').strip()
+            # Add am/pm if missing
+            def fix_ampm(t, fallback=None):
+                t = t.strip()
+                if re.search(r'[ap]\.m\.', t, re.IGNORECASE):
+                    return t
+                if fallback and re.search(r'[ap]\.m\.', fallback, re.IGNORECASE):
+                    return t + ' ' + re.search(r'([ap]\.m\.)', fallback, re.IGNORECASE).group(1)
+                # If 24-hour, convert
+                try:
+                    dt = dt_parse(t)
+                    return dt.strftime('%-I:%M %p').lower().replace('am', 'a.m.').replace('pm', 'p.m.')
+                except Exception:
+                    return t
+            t1 = fix_ampm(t1, t2)
+            t2 = fix_ampm(t2, t1)
+            return f"{t1} to {t2}"
+    # If single time
+    single_match = re.search(r'(\d{1,2}[:h.,]?\d{0,2})\s*([ap]\.m\.|[ap]m|)', time_str, re.IGNORECASE)
+    if single_match:
+        t = single_match.group(1).replace('h', ':').replace('.', ':').replace(',', ':').strip()
+        ampm = single_match.group(2)
+        if not ampm:
+            # Try to infer from context or fallback to 24-hour conversion
+            try:
+                dt = dt_parse(t)
+                return dt.strftime('%-I:%M %p').lower().replace('am', 'a.m.').replace('pm', 'p.m.')
+            except Exception:
+                return t
+        return f"{t} {ampm if ampm else ''}".strip()
+    # If only a number (e.g., '22:00' or '23'), convert to am/pm
+    just_number = re.match(r'^(\d{1,2})(:00)?$', time_str.strip())
+    if just_number:
+        t = just_number.group(1)
+        try:
+            dt = dt_parse(t)
+            return dt.strftime('%-I:%M %p').lower().replace('am', 'a.m.').replace('pm', 'p.m.')
+        except Exception:
+            return time_str
+    # If nothing matches, return as is
+    return time_str.strip()
+
+
 # ---------------------------------------------------------------------
 # 3.  MAIN ENTRY-POINT
 # ---------------------------------------------------------------------
@@ -187,6 +245,8 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         fallback_time = extract_time_from_raw_when(raw_when)
         logger.info(f"Fallback extracted time: {fallback_time}")
         time_str = fallback_time
+    # Normalize time to am/pm format
+    time_str = normalize_time_am_pm(time_str) if time_str else None
 
     # ---------- flags ------------------------------------------------------
     live_band    = raw.get("live_band")
@@ -216,7 +276,11 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "time":             time_str,
     }
 
+    # ---------- dance event filtering --------------------------------------
+    # Only include events with at least one recognized dance style
     if not styles:
-        logger.warning(f"No dance styles detected for event: {raw.get('id') or raw.get('event_id')} - {name}")
+        logger.warning(f"No dance styles detected for event: {raw.get('id') or raw.get('event_id')} - {name}. Filtering out.")
+        transform_event_data.filtered_count = getattr(transform_event_data, 'filtered_count', 0) + 1
+        return None
 
     return cleaned 
