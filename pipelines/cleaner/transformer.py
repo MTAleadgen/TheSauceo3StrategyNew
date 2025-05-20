@@ -120,16 +120,27 @@ def _format_time_human(dt: datetime) -> str:
 
 
 def extract_time_from_raw_when(raw_when: str) -> Optional[str]:
+    logger = logging.getLogger(__name__)
     if not raw_when:
         return None
     # Try to find time ranges like "8:00 p.m. – 1:00 a.m." or "19:00 – 01:00" or "8:00 – 9:30 PM"
-    time_range = re.search(r"(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})\s*(?:–|to|a|al|até)\s*(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})", raw_when, re.IGNORECASE)
+    time_range = re.search(r'(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})\s*(?:–|to|a|al|até|\'al\'|-)\s*(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})', raw_when, re.IGNORECASE)
     if time_range:
-        return f"{time_range.group(1).strip()} to {time_range.group(2).strip()}"
-    # Try to find a single time
-    single_time = re.search(r"(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})", raw_when, re.IGNORECASE)
+        t1 = time_range.group(1).strip()
+        t2 = time_range.group(2).strip()
+        # Only accept if at least one has a colon or am/pm
+        if (":" in t1 or ":" in t2 or re.search(r'[ap]\.m\.', t1 + t2, re.IGNORECASE)):
+            return f"{t1} to {t2}"
+    # Try to find single times like "7:00 p.m." or "19:00"
+    single_time = re.search(r'(\d{1,2}[:h.,]\d{2}\s*[ap]?\.?m?\.?|\d{1,2}\s*[ap]\.m\.)', raw_when, re.IGNORECASE)
     if single_time:
         return single_time.group(1).strip()
+    # If only a number is found, ignore it (likely a day, not a time)
+    just_number = re.search(r'\b(\d{1,2})\b', raw_when)
+    if just_number:
+        logger.info(f"Fallback found only a number in raw_when, ignoring as time: {just_number.group(1)} from '{raw_when}'")
+        return None
+    logger.warning(f"Fallback failed to extract valid time from raw_when: '{raw_when}'")
     return None
 
 
