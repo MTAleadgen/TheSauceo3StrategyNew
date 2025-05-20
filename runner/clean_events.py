@@ -85,7 +85,6 @@ def main():
     total_processed = 0
     total_upserted = 0
     total_failed = 0
-    filtered_events = []  # To collect filtered (non-dance) events
     failed_events_summary = []  # Collect all failed events and reasons
     logger.info(f"Processing {len(events)} events")
     for event in events:
@@ -104,14 +103,6 @@ def main():
             if not cleaned:
                 logger.warning(f"Transformer returned None for event: {event_id}. Proceeding to upsert anyway.")
                 cleaned = event  # Use the event as-is if transformer returns None
-            # Step 2.5: Filter by is_dance_event
-            logger.info(f"Checking is_dance_event for {event_id}: {cleaned.get('is_dance_event')}")
-            if cleaned.get('is_dance_event') is False:
-                logger.info(f"Skipping non-dance event: {event_id} - {event_name}")
-                filtered_events.append({'id': event_id, 'name': event_name})
-                failed_events_summary.append({'id': event_id, 'name': event_name, 'reason': 'Filtered by is_dance_event=False'})
-                total_failed += 1
-                continue
             # Step 2.6: Validate data before upsert
             is_valid, validation_error = validate_event_data(cleaned)
             if not is_valid:
@@ -124,6 +115,9 @@ def main():
             if not cleaned.get('time'):
                 logger.warning(f"Event missing time: {event_id} - {event_name}. LLM output: {event}")
             # Step 3: Upsert to events_clean with retry
+            # Ensure is_dance_event is always present (True/False/None)
+            if 'is_dance_event' not in cleaned:
+                cleaned['is_dance_event'] = None
             logger.info(f"Upserting event: {event_id} - {cleaned.get('name')}")
             success, upsert_error = upsert_event_clean_with_retry(supabase, cleaned)
             if success:
@@ -139,12 +133,6 @@ def main():
             save_failed_event(event, str(e))
             failed_events_summary.append({'id': event.get('id') or event.get('source_id'), 'name': event.get('name'), 'reason': f'Exception: {e}'})
             total_failed += 1
-    # Log a summary of filtered (non-dance) events
-    if filtered_events:
-        logger.info("\n==== Filtered (Non-Dance) Events Report ====")
-        for fe in filtered_events:
-            logger.info(f"Filtered out: ID={fe['id']}, Name={fe['name']}")
-        logger.info("==== End of Filtered Events Report ====")
     # Log a summary of all failed events and reasons
     if failed_events_summary:
         logger.info("\n==== Failed Events Report ====")
