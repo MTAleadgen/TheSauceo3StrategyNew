@@ -62,6 +62,7 @@ def main():
     total_processed = 0
     total_upserted = 0
     total_failed = 0
+    filtered_events = []  # To collect filtered (non-dance) events
     logger.info(f"Processing {len(events)} events")
     for event in events:
         try:
@@ -76,13 +77,13 @@ def main():
             cleaned = transform_event_data(event)
             logger.info(f"Cleaned Event for {event_id}: {cleaned}")
             if not cleaned:
-                logger.warning(f"Event skipped by transformer: {event_id} (transformer returned None)")
-                total_failed += 1
-                continue
+                logger.warning(f"Transformer returned None for event: {event_id}. Proceeding to upsert anyway.")
+                cleaned = event  # Use the event as-is if transformer returns None
             # Step 2.5: Filter by is_dance_event
             logger.info(f"Checking is_dance_event for {event_id}: {cleaned.get('is_dance_event')}")
             if cleaned.get('is_dance_event') is False:
                 logger.info(f"Skipping non-dance event: {event_id} - {event.get('name')}")
+                filtered_events.append({'id': event_id, 'name': event.get('name')})
                 total_failed += 1
                 continue
             # Log if time is missing
@@ -99,6 +100,12 @@ def main():
         except Exception as e:
             logger.error(f"Failed to process event {event.get('id') or event.get('source_id')}: {e}")
             total_failed += 1
+    # Log a summary of filtered (non-dance) events
+    if filtered_events:
+        logger.info("\n==== Filtered (Non-Dance) Events Report ====")
+        for fe in filtered_events:
+            logger.info(f"Filtered out: ID={fe['id']}, Name={fe['name']}")
+        logger.info("==== End of Filtered Events Report ====")
     logger.info(f"Done. Processed: {total_processed}, Upserted: {total_upserted}, Failed: {total_failed}")
 
 if __name__ == "__main__":

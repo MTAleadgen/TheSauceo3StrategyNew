@@ -227,5 +227,16 @@ if __name__ == "__main__":
     ], check=True)
     print(f"[✓] Remote instance {ip} is set up and clean_events.py has run.")
 
+    # Download logs from remote instance before termination
+    print(f"[ ] Downloading logs from {ip}…")
+    scp_log_cmd = [
+        "scp",
+        "-i", PRIVATE_SSH_KEY_PATH,
+        "-o", "StrictHostKeyChecking=no",
+        f"ubuntu@{ip}:~/TheSauceo3StrategyNew/logs/clean_events.log",
+        "./logs/clean_events.log"
+    ]
+    subprocess.run(scp_log_cmd, check=True)
+
     # Terminate the instance after processing is complete
     terminate_instance(instance_id) 
