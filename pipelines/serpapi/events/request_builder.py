@@ -15,7 +15,7 @@ if not SERPAPI_API_KEY:
 
 # Define the search query string
 # Note: Double quotes within the string need to be escaped
-EVENTS_SEARCH_QUERY = 'bachata OR kizomba OR salsa OR "coast swing" OR chacha OR "cha cha" OR ballroom OR hustle OR "house dance" OR rumba OR samba OR zouk OR lambada OR semba OR cumbia OR forro OR "social dance" OR dancing OR dance'
+EVENTS_SEARCH_QUERY = 'bachata OR kizomba OR salsa OR "coast swing" OR chacha OR "cha cha" OR ballroom OR hustle OR waltz OR rumba OR samba OR zouk OR lambada OR afrobeat OR cumbia OR forro OR "social dance" OR dancing OR dance OR kiz OR mambo'
 
 DEFAULT_PARAMS = {
     "engine": "google_events",

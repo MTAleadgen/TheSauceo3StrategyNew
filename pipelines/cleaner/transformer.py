@@ -47,7 +47,11 @@ DANCE_STYLE_KEYWORDS = {
     "cueca": [r"cueca"],
     "timba": [r"timba"],
     "west coast swing": [r"west coast swing"],
-    "vallenato": [r"vallenato"]
+    "vallenato": [r"vallenato"],
+    "pagode": [r"pagode"],
+    "waltz": [r"waltz"],
+    "lindy hop": [r"lindy hop"],
+    "afrobeat": [r"afrobeat"]
 }
 
 
@@ -277,9 +281,14 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
     # ---------- dance event filtering --------------------------------------
-    # Only include events with at least one recognized dance style
-    if not styles:
-        logger.warning(f"No dance styles detected for event: {raw.get('id') or raw.get('event_id')} - {name}. Filtering out.")
+    # Only filter out if it's a concert/live music event and no dance style is detected
+    concert_keywords = [
+        "concert", "performs live", "band", "show", "live at", "music event", "dj set", "performs on stage", "live performance", "musical performance"
+    ]
+    text = f"{name} {description}".lower()
+    is_concert = any(kw in text for kw in concert_keywords)
+    if not styles and is_concert:
+        logger.warning(f"Concert/live music event with no dance style detected: {raw.get('id') or raw.get('event_id')} - {name}. Filtering out.")
         transform_event_data.filtered_count = getattr(transform_event_data, 'filtered_count', 0) + 1
         return None
 
