@@ -18,7 +18,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 logger.info(f'Current working directory: {os.getcwd()}')
-logger.info(f'Log file should be at: {LOGS_DIR}/clean_events.log')
 
 # Load environment variables
 load_dotenv()
@@ -87,11 +86,13 @@ def main():
     total_upserted = 0
     total_failed = 0
     filtered_events = []  # To collect filtered (non-dance) events
+    failed_events_summary = []  # Collect all failed events and reasons
     logger.info(f"Processing {len(events)} events")
     for event in events:
         try:
             event_id = event.get('id') or event.get('source_id')
-            logger.info(f"\n--- Processing Event ---\nID: {event_id}\nName: {event.get('name')}\nDescription: {event.get('description')}\nRaw_when: {event.get('raw_when')}\nTime: {event.get('time')}")
+            event_name = event.get('name')
+            logger.info(f"\n--- Processing Event ---\nID: {event_id}\nName: {event_name}\nDescription: {event.get('description')}\nRaw_when: {event.get('raw_when')}\nTime: {event.get('time')}")
             # Step 1: Enrich event with LLM (description, live_band, class_before, is_dance_event)
             if event.get('description'):
                 event_llm = enrich_event_with_llm(event)
@@ -106,8 +107,9 @@ def main():
             # Step 2.5: Filter by is_dance_event
             logger.info(f"Checking is_dance_event for {event_id}: {cleaned.get('is_dance_event')}")
             if cleaned.get('is_dance_event') is False:
-                logger.info(f"Skipping non-dance event: {event_id} - {event.get('name')}")
-                filtered_events.append({'id': event_id, 'name': event.get('name')})
+                logger.info(f"Skipping non-dance event: {event_id} - {event_name}")
+                filtered_events.append({'id': event_id, 'name': event_name})
+                failed_events_summary.append({'id': event_id, 'name': event_name, 'reason': 'Filtered by is_dance_event=False'})
                 total_failed += 1
                 continue
             # Step 2.6: Validate data before upsert
@@ -115,11 +117,12 @@ def main():
             if not is_valid:
                 logger.error(f"Validation failed for event: {event_id}. Error: {validation_error}. Data: {cleaned}")
                 save_failed_event(cleaned, validation_error)
+                failed_events_summary.append({'id': event_id, 'name': event_name, 'reason': f'Validation failed: {validation_error}'})
                 total_failed += 1
                 continue
             # Log if time is missing
             if not cleaned.get('time'):
-                logger.warning(f"Event missing time: {event_id} - {event.get('name')}. LLM output: {event}")
+                logger.warning(f"Event missing time: {event_id} - {event_name}. LLM output: {event}")
             # Step 3: Upsert to events_clean with retry
             logger.info(f"Upserting event: {event_id} - {cleaned.get('name')}")
             success, upsert_error = upsert_event_clean_with_retry(supabase, cleaned)
@@ -128,11 +131,13 @@ def main():
             else:
                 logger.warning(f"Upsert failed for event: {event_id}. Error: {upsert_error}. Data: {cleaned}")
                 save_failed_event(cleaned, upsert_error)
+                failed_events_summary.append({'id': event_id, 'name': event_name, 'reason': f'Upsert failed: {upsert_error}'})
                 total_failed += 1
             total_processed += 1
         except Exception as e:
             logger.error(f"Failed to process event {event.get('id') or event.get('source_id')}: {e}. Data: {event}")
             save_failed_event(event, str(e))
+            failed_events_summary.append({'id': event.get('id') or event.get('source_id'), 'name': event.get('name'), 'reason': f'Exception: {e}'})
             total_failed += 1
     # Log a summary of filtered (non-dance) events
     if filtered_events:
@@ -140,6 +145,12 @@ def main():
         for fe in filtered_events:
             logger.info(f"Filtered out: ID={fe['id']}, Name={fe['name']}")
         logger.info("==== End of Filtered Events Report ====")
+    # Log a summary of all failed events and reasons
+    if failed_events_summary:
+        logger.info("\n==== Failed Events Report ====")
+        for fe in failed_events_summary:
+            logger.info(f"Failed: ID={fe['id']}, Name={fe['name']}, Reason={fe['reason']}")
+        logger.info("==== End of Failed Events Report ====")
     logger.info(f"Done. Processed: {total_processed}, Upserted: {total_upserted}, Failed: {total_failed}")
     logger.info("Finalizing and flushing logs to disk...")
     logging.shutdown()
