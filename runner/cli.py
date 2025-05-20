@@ -12,7 +12,7 @@ import json
 import math # For pagination
 import backoff # For retries
 from requests.exceptions import RequestException # Specific exception for backoff
-from datetime import datetime
+from datetime import datetime, timedelta
 import string
 from unidecode import unidecode
 
@@ -179,6 +179,19 @@ def canon(txt):
         return None
     txt = unidecode(txt.lower()).translate(str.maketrans('', '', string.punctuation))
     return " ".join(txt.split())
+
+def should_fetch_next_page(events, max_events=10, days_window=7, threshold=0.8):
+    """Return True if next page should be fetched: page is full and most events are within the next week."""
+    if len(events) < max_events:
+        return False
+    now = datetime.now()
+    week_later = now + timedelta(days=days_window)
+    in_window = [
+        e for e in events
+        if 'event_day' in e and e['event_day']
+        and now <= datetime.strptime(e['event_day'], '%Y-%m-%d') <= week_later
+    ]
+    return len(in_window) / len(events) >= threshold
 
 # --- Main Execution --- 
 
@@ -357,6 +370,11 @@ def main():
             
             if events_fetched_for_city >= args.max_events:
                 break # Break from while loop (pagination)
+
+            # --- SMART PAGINATION: Only fetch next page if most events are soon ---
+            if not should_fetch_next_page([parse_event_result(e, city_info=city_info) for e in events_on_page]):
+                logging.info(f"Smart pagination: Not fetching next page for {city_info['name']} (not enough near-term events).")
+                break
 
             # Check if there are more pages
             pagination_info = result_json.get("serpapi_pagination", result_json.get("pagination")) # check both keys

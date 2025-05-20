@@ -43,7 +43,12 @@ def create_instance(region, max_retries=3, retry_delay=5):
     for attempt in range(1, max_retries + 1):
         try:
             resp = requests.post(f"{LAMBDA_API_URL}/launch", headers=headers, json=payload)
-            data = resp.json()
+            try:
+                data = resp.json()
+            except Exception as e:
+                print(f"ERROR: Could not decode JSON from response in region {region}: {e}")
+                print("Raw response text:", resp.text)
+                return None
             # Only print full response for unexpected errors
             if resp.status_code != 200:
                 error_code = data.get("error", {}).get("code")
@@ -191,7 +196,7 @@ if __name__ == "__main__":
         f"ubuntu@{ip}"
     ]
     subprocess.run(ssh_base + [
-        "git clone --branch lambda-automation-fix https://github.com/MTAleadgen/TheSauceo3StrategyNew.git || true"
+        "git clone --branch master https://github.com/MTAleadgen/TheSauceo3StrategyNew.git || true"
     ], check=True)
 
     # Now copy .env file to remote instance
