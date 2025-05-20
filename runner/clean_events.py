@@ -41,12 +41,11 @@ def get_all_events(supabase: Client):
         return []
 
 def validate_event_data(event):
-    # Example validation: ensure required fields exist and are of correct type
-    required_fields = ['event_id', 'name', 'event_day']
+    # Only require event_id for upsert; name/event_day are optional
+    required_fields = ['event_id']
     for field in required_fields:
         if field not in event or event[field] is None:
             return False, f"Missing required field: {field}"
-    # Add more validation as needed
     return True, None
 
 def upsert_event_clean_with_retry(supabase: Client, event_clean: dict, max_retries=3, delay=2):
@@ -103,6 +102,9 @@ def main():
             if not cleaned:
                 logger.warning(f"Transformer returned None for event: {event_id}. Proceeding to upsert anyway.")
                 cleaned = event  # Use the event as-is if transformer returns None
+            # Always ensure event_id is present before validation/upsert
+            # Use event_id, or fallback to id or source_id
+            cleaned['event_id'] = cleaned.get('event_id') or cleaned.get('id') or cleaned.get('source_id')
             # Step 2.6: Validate data before upsert
             is_valid, validation_error = validate_event_data(cleaned)
             if not is_valid:
