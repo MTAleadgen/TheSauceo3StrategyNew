@@ -9,16 +9,16 @@ from pipelines.serpapi.events.qwen_cleaner import enrich_event_with_llm
 from pipelines.cleaner.transformer import transform_event_data
 
 # Setup logging
-os.makedirs('logs', exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/clean_events.log', mode='w', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+logger.info(f'Current working directory: {os.getcwd()}')
+logger.info(f'Log file should be at: {LOGS_DIR}/clean_events.log')
 
 # Load environment variables
 load_dotenv()
@@ -70,9 +70,11 @@ def upsert_event_clean_with_retry(supabase: Client, event_clean: dict, max_retri
 
 def save_failed_event(event, error):
     try:
-        os.makedirs('logs', exist_ok=True)
-        with open('logs/failed_events.jsonl', 'a', encoding='utf-8') as f:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        failed_events_path = f'{LOGS_DIR}/failed_events.jsonl'
+        with open(failed_events_path, 'a', encoding='utf-8') as f:
             f.write(json.dumps({'event': event, 'error': error}, ensure_ascii=False) + '\n')
+        logger.info(f'Wrote failed event to {failed_events_path}')
     except Exception as e:
         logger.error(f"Failed to save failed event: {e}")
 
