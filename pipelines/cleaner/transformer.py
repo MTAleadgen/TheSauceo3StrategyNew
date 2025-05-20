@@ -37,7 +37,17 @@ DANCE_STYLE_KEYWORDS = {
     "forro": [r"forró", r"forro"],
     "samba": [r"samba"],
     "rumba": [r"rumba"],
-    "line dancing": [r"line dance", r"line dancing", r"line-dancing"]
+    "line dancing": [r"line dance", r"line dancing", r"line-dancing"],
+    "ballroom": [r"ballroom"],
+    "tea dance": [r"tea dance"],
+    "cha cha": [r"cha cha", r"chacha"],
+    "merengue": [r"merengue"],
+    "cumbia": [r"cumbia"],
+    "bolero": [r"bolero"],
+    "cueca": [r"cueca"],
+    "timba": [r"timba"],
+    "west coast swing": [r"west coast swing"],
+    "vallenato": [r"vallenato"]
 }
 
 
