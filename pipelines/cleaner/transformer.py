@@ -158,62 +158,71 @@ def extract_time_from_raw_when(raw_when: str) -> Optional[str]:
     return None
 
 
+def clean_meridiem(time_str):
+    """Fixes p:m: to p.m. and normalizes meridiem, only in the right context."""
+    if not time_str:
+        return time_str
+    # Replace p:m: or a:m: with p.m. or a.m.
+    time_str = re.sub(r'([ap])[:\.]m[:\.]', r'\1.m.', time_str, flags=re.IGNORECASE)
+    # Replace p:m or a:m with p.m. or a.m.
+    time_str = re.sub(r'([ap])[:\.]m', r'\1.m.', time_str, flags=re.IGNORECASE)
+    # Replace p m or a m with p.m. or a.m.
+    time_str = re.sub(r'([ap])\s*m', r'\1.m.', time_str, flags=re.IGNORECASE)
+    # Remove duplicate colons
+    time_str = re.sub(r':+', ':', time_str)
+    # Remove trailing colons
+    time_str = re.sub(r':\b', '', time_str)
+    return time_str
+
+
+def to_12_hour(hour, minute):
+    hour = int(hour)
+    minute = int(minute)
+    ampm = 'a.m.' if hour < 12 else 'p.m.'
+    hour12 = hour % 12 or 12
+    return f'{hour12}:{minute:02d} {ampm}'
+
+
 def normalize_time_am_pm(time_str: str) -> Optional[str]:
     if not time_str:
         return None
     # Remove extraneous date text (e.g., 'Thursday, June 19, 1:00 p.m. to Sunday, June 22, 5:00 p.m.')
     # Keep only the time range or single time
     # Try to extract the last two time-like strings (for ranges)
-    matches = re.findall(r'(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})', time_str)
-    ampm_matches = re.findall(r'(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})', time_str)
+    matches = re.findall(r'(\d{1,2})(?::(\d{2}))?\s*([ap]\.m\.|[ap]m)?', time_str)
     # If range
     if 'to' in time_str or '–' in time_str or '-' in time_str:
         # Try to extract two times
-        range_match = re.search(r'(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})\s*(?:to|–|-)\s*(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})', time_str, re.IGNORECASE)
+        range_match = re.search(r'(\d{1,2})(?::(\d{2}))?\s*([ap]\.m\.|[ap]m)?\s*(?:to|–|-)\s*(\d{1,2})(?::(\d{2}))?\s*([ap]\.m\.|[ap]m)?', time_str, re.IGNORECASE)
         if range_match:
-            t1, t2 = range_match.group(1), range_match.group(2)
-            t1 = t1.replace('h', ':').replace('.', ':').replace(',', ':').strip()
-            t2 = t2.replace('h', ':').replace('.', ':').replace(',', ':').strip()
-            # Add am/pm if missing
-            def fix_ampm(t, fallback=None):
-                t = t.strip()
-                if re.search(r'[ap]\.m\.', t, re.IGNORECASE):
-                    return t
-                if fallback and re.search(r'[ap]\.m\.', fallback, re.IGNORECASE):
-                    return t + ' ' + re.search(r'([ap]\.m\.)', fallback, re.IGNORECASE).group(1)
-                # If 24-hour, convert
-                try:
-                    dt = dt_parse(t)
-                    return dt.strftime('%-I:%M %p').lower().replace('am', 'a.m.').replace('pm', 'p.m.')
-                except Exception:
-                    return t
-            t1 = fix_ampm(t1, t2)
-            t2 = fix_ampm(t2, t1)
-            return f"{t1} to {t2}"
+            h1, m1, ampm1, h2, m2, ampm2 = range_match.groups()
+            m1 = m1 or '00'
+            m2 = m2 or '00'
+            # Convert to 12-hour if needed
+            t1 = to_12_hour(h1, m1) if not ampm1 else f"{int(h1)%12 or 12}:{m1} {ampm1.strip('.').lower()}."
+            t2 = to_12_hour(h2, m2) if not ampm2 else f"{int(h2)%12 or 12}:{m2} {ampm2.strip('.').lower()}."
+            result = f"{t1} to {t2}"
+            return clean_meridiem(result)
     # If single time
-    single_match = re.search(r'(\d{1,2}[:h.,]?\d{0,2})\s*([ap]\.m\.|[ap]m|)', time_str, re.IGNORECASE)
+    single_match = re.match(r'(\d{1,2})(?::(\d{2}))?\s*([ap]\.m\.|[ap]m)?', time_str, re.IGNORECASE)
     if single_match:
-        t = single_match.group(1).replace('h', ':').replace('.', ':').replace(',', ':').strip()
-        ampm = single_match.group(2)
-        if not ampm:
-            # Try to infer from context or fallback to 24-hour conversion
-            try:
-                dt = dt_parse(t)
-                return dt.strftime('%-I:%M %p').lower().replace('am', 'a.m.').replace('pm', 'p.m.')
-            except Exception:
-                return t
-        return f"{t} {ampm if ampm else ''}".strip()
+        h, m, ampm = single_match.groups()
+        m = m or '00'
+        if ampm:
+            t = f"{int(h)%12 or 12}:{m} {ampm.strip('.').lower()}."
+        else:
+            t = to_12_hour(h, m)
+        return clean_meridiem(t)
     # If only a number (e.g., '22:00' or '23'), convert to am/pm
     just_number = re.match(r'^(\d{1,2})(:00)?$', time_str.strip())
     if just_number:
         t = just_number.group(1)
         try:
-            dt = dt_parse(t)
-            return dt.strftime('%-I:%M %p').lower().replace('am', 'a.m.').replace('pm', 'p.m.')
+            return clean_meridiem(to_12_hour(t, '00'))
         except Exception:
             return time_str
     # If nothing matches, return as is
-    return time_str.strip()
+    return clean_meridiem(time_str.strip())
 
 
 # ---------------------------------------------------------------------
@@ -251,6 +260,8 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         time_str = fallback_time
     # Normalize time to am/pm format
     time_str = normalize_time_am_pm(time_str) if time_str else None
+    if not time_str:
+        logger.warning(f"Event missing or ambiguous time after normalization. raw_when: {raw.get('raw_when')}, description: {description}, name: {name}")
 
     # ---------- flags ------------------------------------------------------
     live_band    = raw.get("live_band")

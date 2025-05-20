@@ -31,8 +31,17 @@ except ImportError as e:
     print("Ensure the script is run correctly relative to the project structure, e.g., using 'python -m runner.cli'")
     sys.exit(1)
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Ensure logs directory exists
+os.makedirs('logs', exist_ok=True)
+# Configure logging to file and console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('logs/clean_events.log', mode='w', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Constants
