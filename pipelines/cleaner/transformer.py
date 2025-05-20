@@ -119,6 +119,20 @@ def _format_time_human(dt: datetime) -> str:
     return f"{hour} {ampm}"
 
 
+def extract_time_from_raw_when(raw_when: str) -> Optional[str]:
+    if not raw_when:
+        return None
+    # Try to find time ranges like "8:00 p.m. – 1:00 a.m." or "19:00 – 01:00" or "8:00 – 9:30 PM"
+    time_range = re.search(r"(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})\s*(?:–|to|a|al|até)\s*(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})", raw_when, re.IGNORECASE)
+    if time_range:
+        return f"{time_range.group(1).strip()} to {time_range.group(2).strip()}"
+    # Try to find a single time
+    single_time = re.search(r"(\d{1,2}[:h.,]?\d{0,2}\s*[ap]?\.?m?\.?|\d{1,2})", raw_when, re.IGNORECASE)
+    if single_time:
+        return single_time.group(1).strip()
+    return None
+
+
 # ---------------------------------------------------------------------
 # 3.  MAIN ENTRY-POINT
 # ---------------------------------------------------------------------
@@ -146,6 +160,12 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     start_ts = _combine_date_time(ev_day, raw.get("start_time"))
     end_ts   = _combine_date_time(ev_day, raw.get("end_time"))
     time_str = raw.get("time")  # Expect LLM to provide normalized time
+    if not time_str:
+        raw_when = raw.get("raw_when", "")
+        logger.info(f"LLM did not provide time. Attempting fallback extraction from raw_when: {raw_when}")
+        fallback_time = extract_time_from_raw_when(raw_when)
+        logger.info(f"Fallback extracted time: {fallback_time}")
+        time_str = fallback_time
 
     # ---------- flags ------------------------------------------------------
     live_band    = raw.get("live_band")
