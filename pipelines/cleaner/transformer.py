@@ -257,6 +257,10 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     class_before = raw.get("class_before")
     price        = raw.get("price")
 
+    # ---------- is_dance_event passthrough ---------------------------------
+    is_dance_event = raw.get("is_dance_event")
+    logger.info(f"is_dance_event from LLM: {is_dance_event}")
+
     # ----------------------------------------------------------------------
     cleaned: Dict[str, Any] = {
         "event_id":  raw.get("id") or raw.get("event_id"),
@@ -278,6 +282,8 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         # Add source_url passthrough
         "source_url":       raw.get("source_url"),
         "time":             time_str,
+        # Add is_dance_event passthrough
+        "is_dance_event":   is_dance_event,
     }
 
     # ---------- dance event filtering --------------------------------------
@@ -287,7 +293,13 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     ]
     text = f"{name} {description}".lower()
     is_concert = any(kw in text for kw in concert_keywords)
-    if not styles and is_concert:
+
+    # Patch: Use is_dance_event if present, else fallback to style/concert logic
+    if is_dance_event is False:
+        logger.warning(f"Event filtered out by is_dance_event=False: {raw.get('id') or raw.get('event_id')} - {name}")
+        transform_event_data.filtered_count = getattr(transform_event_data, 'filtered_count', 0) + 1
+        return None
+    if not styles and is_concert and is_dance_event is not True:
         logger.warning(f"Concert/live music event with no dance style detected: {raw.get('id') or raw.get('event_id')} - {name}. Filtering out.")
         transform_event_data.filtered_count = getattr(transform_event_data, 'filtered_count', 0) + 1
         return None
