@@ -288,7 +288,26 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     is_dance_event = raw.get("is_dance_event")
     logger.info(f"is_dance_event from LLM: {is_dance_event}")
 
-    # ----------------------------------------------------------------------
+    # ---------- dance event logic ------------------------------------------
+    # Genres to consider as dance events
+    allowed_genres = {"bachata", "zouk", "salsa", "pagode"}
+    # Concert keywords
+    concert_keywords = [
+        "concert", "performs live", "band", "show", "live at", "music event", "dj set", "performs on stage", "live performance", "musical performance"
+    ]
+    text = f"{name} {description}".lower()
+    is_concert = any(kw in text for kw in concert_keywords)
+    # If LLM set is_dance_event, use it
+    if is_dance_event is not None:
+        pass  # Use LLM's value
+    else:
+        # If it's a concert and none of the allowed genres are present, set to False
+        if is_concert and not any(style in allowed_genres for style in styles):
+            is_dance_event = False
+        else:
+            # Otherwise, default to True (unless obviously not a dance event)
+            is_dance_event = True
+
     cleaned: Dict[str, Any] = {
         "event_id":  raw.get("id") or raw.get("event_id"),
         "description":      description,
@@ -312,23 +331,5 @@ def transform_event_data(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         # Add is_dance_event passthrough
         "is_dance_event":   is_dance_event,
     }
-
-    # ---------- dance event filtering --------------------------------------
-    # Only filter out if it's a concert/live music event and no dance style is detected
-    concert_keywords = [
-        "concert", "performs live", "band", "show", "live at", "music event", "dj set", "performs on stage", "live performance", "musical performance"
-    ]
-    text = f"{name} {description}".lower()
-    is_concert = any(kw in text for kw in concert_keywords)
-
-    # Patch: Use is_dance_event if present, else fallback to style/concert logic
-    if is_dance_event is False:
-        logger.warning(f"Event filtered out by is_dance_event=False: {raw.get('id') or raw.get('event_id')} - {name}")
-        transform_event_data.filtered_count = getattr(transform_event_data, 'filtered_count', 0) + 1
-        return None
-    if not styles and is_concert and is_dance_event is not True:
-        logger.warning(f"Concert/live music event with no dance style detected: {raw.get('id') or raw.get('event_id')} - {name}. Filtering out.")
-        transform_event_data.filtered_count = getattr(transform_event_data, 'filtered_count', 0) + 1
-        return None
 
     return cleaned 

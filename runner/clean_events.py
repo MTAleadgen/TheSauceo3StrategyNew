@@ -40,14 +40,6 @@ def get_all_events(supabase: Client):
         logger.error(f"Error fetching events from Supabase: {e}")
         return []
 
-def validate_event_data(event):
-    # Only require event_id for upsert; name/event_day are optional
-    required_fields = ['event_id']
-    for field in required_fields:
-        if field not in event or event[field] is None:
-            return False, f"Missing required field: {field}"
-    return True, None
-
 def upsert_event_clean_with_retry(supabase: Client, event_clean: dict, max_retries=3, delay=2):
     for attempt in range(1, max_retries + 1):
         try:
@@ -102,17 +94,10 @@ def main():
             if not cleaned:
                 logger.warning(f"Transformer returned None for event: {event_id}. Proceeding to upsert anyway.")
                 cleaned = event  # Use the event as-is if transformer returns None
-            # Always ensure event_id is present before validation/upsert
-            # Use event_id, or fallback to id or source_id
+            # Always ensure event_id is present before upsert
             cleaned['event_id'] = cleaned.get('event_id') or cleaned.get('id') or cleaned.get('source_id')
-            # Step 2.6: Validate data before upsert
-            is_valid, validation_error = validate_event_data(cleaned)
-            if not is_valid:
-                logger.error(f"Validation failed for event: {event_id}. Error: {validation_error}. Data: {cleaned}")
-                save_failed_event(cleaned, validation_error)
-                failed_events_summary.append({'id': event_id, 'name': event_name, 'reason': f'Validation failed: {validation_error}'})
-                total_failed += 1
-                continue
+            if not cleaned['event_id']:
+                logger.warning(f"Event missing event_id: {event_id} - {event_name}. Data: {cleaned}")
             # Log if time is missing
             if not cleaned.get('time'):
                 logger.warning(f"Event missing time: {event_id} - {event_name}. LLM output: {event}")
