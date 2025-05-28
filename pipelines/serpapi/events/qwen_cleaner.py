@@ -99,14 +99,16 @@ def _call_llm(prompt: str) -> str:
 def enrich_event_with_llm(event: dict) -> dict:
     if not LAMBDA_ENDPOINT or not HEADERS:
         logger.warning("Skipping LLM enrichment: Endpoint or Token not configured.")
-        event_copy = event.copy()
-        event_copy["description"] = event.get("description")
-        event_copy["live_band"] = None
-        event_copy["class_before"] = None
-        event_copy["name"] = event.get("name")
-        event_copy["price"] = event.get("price")
-        event_copy["time"] = None
-        event_copy["is_dance_event"] = None
+        event_copy = event.copy() # Ensure all original fields are carried over
+        # Ensure essential fields for qwen have fallbacks if not present in original event
+        event_copy["description"] = event.get("description") # LLM will rewrite this
+        event_copy["live_band"] = event.get("live_band", None) # LLM will determine
+        event_copy["class_before"] = event.get("class_before", None) # LLM will determine
+        event_copy["price"] = event.get("price") # LLM will try to extract/format
+        event_copy["time"] = event.get("time") # LLM will try to extract/format
+        event_copy["is_dance_event"] = event.get("is_dance_event", None) # LLM will determine
+        # image_url is not modified by LLM, just carried through
+        # organizer_profile_id is not relevant at this stage
         return event_copy
 
     user_message = f"Event title: {event.get('name', '')}\nEvent description: {event.get('description', '')}\nEvent raw_when: {event.get('raw_when', '')}"
@@ -131,22 +133,24 @@ def enrich_event_with_llm(event: dict) -> dict:
         else:
             raise ValueError(f"No JSON object found in LLM output: {content}")
         llm_result = json.loads(json_str)
+        
+        # Start with a copy of the original event to preserve all fields
         event_copy = event.copy()
-        event_copy["description"] = llm_result.get("rewritten_description")
+        
+        # Update fields based on LLM result
+        event_copy["description"] = llm_result.get("rewritten_description", event.get("description")) # Fallback to original if missing
         event_copy["live_band"] = llm_result.get("live_band")
         event_copy["class_before"] = llm_result.get("class_before")
         # Post-process price to ensure only valid values are accepted
         price = llm_result.get("price")
         if isinstance(price, str):
             price = price.strip()
-            # Accept 'Free' (case-insensitive)
             if price.lower() == "free":
                 price = "Free"
             else:
-                # Accept any price with a currency symbol or word, or a range
                 currency_pattern = r"(r\\$|us?\\$|\\$|€|£|dollars?|usd|euros?|eur|reais|real|brl|pounds?|gbp)"
                 if not re.search(currency_pattern, price, re.I):
-                    price = None
+                    price = event.get("price") # Fallback to original if invalid
         elif price is not None:
             price = str(price)
             if price.lower() == "free":
@@ -154,39 +158,47 @@ def enrich_event_with_llm(event: dict) -> dict:
             else:
                 currency_pattern = r"(r\\$|us?\\$|\\$|€|£|dollars?|usd|euros?|eur|reais|real|brl|pounds?|gbp)"
                 if not re.search(currency_pattern, price, re.I):
-                    price = None
+                    price = event.get("price") # Fallback to original if invalid
+        else: # price is None from LLM
+            price = event.get("price") # Fallback to original price
+
         event_copy["price"] = price
         # Handle time: if missing or null, try fallback extraction
         time_val = llm_result.get("time")
         if not time_val or time_val.lower() in ("null", "none", "tbd", ""):
-            # Try to extract time from description or raw_when using regex
             desc = event.get("description", "")
             raw_when = event.get("raw_when", "")
             time_regex = r"(\d{1,2}:\d{2}\s*[ap]\.?m\.?)(?:\s*(?:to|\-|–)\s*(\d{1,2}:\d{2}\s*[ap]\.?m\.?))?"
-            match = re.search(time_regex, desc, re.IGNORECASE) or re.search(time_regex, raw_when, re.IGNORECASE)
-            if match:
-                if match.group(2):
-                    time_val = f"{match.group(1)} to {match.group(2)}"
-                else:
-                    time_val = match.group(1)
+            match_desc = re.search(time_regex, desc, re.IGNORECASE)
+            match_raw = re.search(time_regex, raw_when, re.IGNORECASE)
+            if match_desc:
+                time_val = f"{match_desc.group(1)}{f' to {match_desc.group(2)}' if match_desc.group(2) else ''}"
+            elif match_raw:
+                time_val = f"{match_raw.group(1)}{f' to {match_raw.group(2)}' if match_raw.group(2) else ''}"
             else:
-                time_val = None
+                time_val = event.get("time") # Fallback to original time if all else fails
             if not time_val:
                 logger.warning(f"LLM and fallback failed to extract time. LLM output: {content}, description: {desc}, raw_when: {raw_when}")
         event_copy["time"] = time_val
-        event_copy["name"] = event.get("name")
         event_copy["is_dance_event"] = llm_result.get("is_dance_event")
+        
+        # Ensure fields like name, image_url, source_platform, source_id, etc., are preserved from the original event
+        # event_copy["name"] is already preserved by event.copy()
+        # event_copy["image_url"] is preserved if it was in the original event by event.copy()
+        # No need to explicitly handle organizer_profile_id here as it's not expected in the input `event` dict for this function.
+        
         return event_copy
     except Exception as e:
-        logger.error(f"Failed to parse LLM JSON: {e}, content: {content}")
-        event_copy = event.copy()
+        logger.error(f"Failed to parse LLM JSON or process event: {e}, content: {content}")
+        event_copy = event.copy() # Start with a fresh copy on error
+        # Fallback for LLM-derived fields
         event_copy["description"] = event.get("description")
-        event_copy["live_band"] = None
-        event_copy["class_before"] = None
+        event_copy["live_band"] = event.get("live_band", None)
+        event_copy["class_before"] = event.get("class_before", None)
         event_copy["price"] = event.get("price")
-        event_copy["time"] = None
-        event_copy["name"] = event.get("name")
-        event_copy["is_dance_event"] = None
+        event_copy["time"] = event.get("time")
+        event_copy["is_dance_event"] = event.get("is_dance_event", None)
+        # image_url and other original fields are preserved by event.copy()
         return event_copy
 
 # Example Usage (Optional - requires LAMBDA_QWEN_URL and LAMBDA_TOKEN in env)

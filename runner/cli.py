@@ -363,7 +363,8 @@ def main():
                 # Remove any fields not in the events table schema before upsert
                 allowed_fields = {
                     'source_id', 'source_url', 'source_platform', 'retrieved_at', 'name', 'description',
-                    'venue', 'address', 'city', 'country', 'lat', 'lng', 'event_day', 'raw_when'
+                    'venue', 'address', 'city', 'country', 'lat', 'lng', 'event_day', 'raw_when',
+                    'image_url' # Added image_url to allowed fields
                 }
                 parsed_event_data = {k: v for k, v in parsed_event_data.items() if k in allowed_fields}
 
